@@ -25,6 +25,8 @@ const DRINK_WORDS = [
   "vodka", "rum", "gin", "pint", "pints", "shot", "shots", "booze", "daaru", "daru", "sangria", "mojito",
   "lager", "tequila", "bar",
 ];
+// Labels that describe a whole bill rather than one item on it.
+const WHOLE_BILL = /^(dinner|lunch|breakfast|brunch|meal|food|party|outing|trip|order|restaurant|cafe|bar|pub|night out)\b/;
 // Segment separators: commas (but not thousands separators like "2,400"), semicolons, newlines, "then".
 const SEGMENT_SPLIT = /(?<!\d),|,(?!\d{2})|[;\n]|\bthen\b|\bplus\b/;
 
@@ -159,14 +161,19 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
   for (const re of payerRes) {
     const m = t.match(re);
     if (!m) continue;
-    const word = m[1].trim().split(/\s*(?:,|&|and|aur|\+)\s*/)[0];
+    let word = m[1].trim().split(/\s*(?:,|&|and|aur|\+)\s*/)[0];
+    // The regexes capture single words; widen to a full name ("riya shah") if one covers this word.
+    const wordAt = m.index! + m[0].indexOf(word);
+    const winStart = Math.max(0, wordAt - 30);
+    const full = scanner.scan(t.slice(winStart, wordAt + word.length + 30)).find((h) => h.start <= wordAt - winStart && h.end >= wordAt - winStart + word.length);
+    if (full && full.key !== word) word = full.key;
     const hits = scanner.scan(word);
     if (hits.length && hits[0].ids.length === 1) out.payer = hits[0].ids[0];
     else if (hits.length && hits[0].ids.length > 1) unresolved.set(word, hits[0].ids);
     else if (["maine", "mene", "humne", "i", "me"].includes(word)) out.payer = sender;
     else if (!(word in (ov.nameMap ?? {})) && !STOP.has(word) && !/^\d/.test(word) && !CATEGORY_WORDS.some(([, r]) => r.test(word)))
       unresolved.set(word, []);
-    blank(m.index!, m.index! + m[0].length);
+    blank(Math.min(m.index!, full ? winStart + full.start : m.index!), Math.max(m.index! + m[0].length, full ? winStart + full.end : 0));
     break;
   }
 
@@ -294,7 +301,7 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
     }
     blank(m.index!, m.index! + m[0].length);
   }
-  for (const m of [...t.matchAll(new RegExp(`${NAMES}\\s+(?:didn'?t|did not|doesn'?t|does not|don'?t|won'?t|isn'?t|wasn'?t|not|no|skip(?:s|ped)?|skipping|is out of|out of|nahi)\\s*(?:have\\s+|having\\s+|take\\s+|the\\s+|any\\s+)?([\\p{L}]+)?`, "gu"))]) {
+  for (const m of [...t.matchAll(new RegExp(`${NAMES}\\s+(?:didn'?t|did not|doesn'?t|does not|don'?t|won'?t|isn'?t|wasn'?t|not|no|skip(?:s|ped)?|skipping|is out of|out of|nahi)\\s*(?:(?:have|having|take|taking|order|ordered|the|any|a|some)\\s+)*([\\p{L}]+)?`, "gu"))]) {
     const ids = namesIn(m[1]);
     if (!ids.length) continue;
     const obj = (m[2] ?? "").toLowerCase();
@@ -333,8 +340,10 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
       // "900 for snacks": fall back to the words after the amount.
       if (!label && after.trim()) label = labelFrom(after, scanner.scan(after), scanner);
       const isOwes = /\b(owes|pays|gives|ka|ke|ki)\b/.test(cleanBefore);
-      if (/^(sub\s?total|subtotal)$/.test(label)) return;
-      if (/^(total|grand total|bill|amount|net|net total|the bill)$/.test(label)) {
+      // "total" and "bill" are stop words, so check the raw words rather than the label.
+      const bare = cleanBefore.replace(/[^\p{L}\s]/gu, " ").replace(/\s+/g, " ").trim();
+      if (/^(sub\s?total|subtotal)$/.test(bare)) return;
+      if (/^(total|grand total|bill|bill total|total bill|amount|net|net total|the bill|the total)$/.test(bare)) {
         explicitTotal = a.paise;
         if (after.trim()) instructionText += " " + after;
         return;
@@ -393,7 +402,9 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
     // Several amounts: "dinner 2400, drinks 600 except riya" — if the first is bigger than the
     // rest put together, treat it as the total and the rest as parts of it.
     const rest = items.slice(1).reduce((s, i) => s + i.paise, 0) + charges.reduce((s, c) => s + c.amountPaise, 0);
-    const firstIsTotal = explicitTotal == null && items.length >= 2 && items[0].paise > rest && exclusions.length + claims.length > 0;
+    // Only when the first line names the whole outing ("dinner", "bill"), not a dish ("pizza 900, beer 600").
+    const firstIsTotal =
+      explicitTotal == null && items.length >= 2 && items[0].paise > rest && exclusions.length + claims.length > 0 && WHOLE_BILL.test(items[0].label);
     if (firstIsTotal) {
       explicitTotal = items[0].paise;
       const first = items.shift()!;
@@ -420,7 +431,8 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
   }
 
   if (out.percents.length === 0 && pctOrder.length) {
-    const order = participants.length === pctOrder.length ? participants : namesIn(instructionText);
+    // If people are already named, the ratio must match them; don't guess a subset.
+    const order = participants.length ? participants : namesIn(instructionText);
     if (order.length === pctOrder.length) {
       order.forEach((id, i) => out.percents.push({ member: id, percent: pctOrder[i] }));
     } else {
@@ -525,7 +537,8 @@ interface AmountHit {
 
 export function findAmounts(s: string): AmountHit[] {
   const out: AmountHit[] = [];
-  const re = /(?<![\p{L}\d.,+×*:/-])(?:₹\s?|rs\.?\s?|inr\s?)?(\d{1,3}(?:,\d{2,3})+|\d+)(?:\.(\d{1,2}))?\s?(k|l|lakh|lac)?(?![\p{L}\d%:/])/gu;
+  // Amounts may end in "/-" ("640/-"), the usual Indian way of writing rupees.
+  const re = /(?<![\p{L}\d.,+×*:/-])(?:₹\s?|rs\.?\s?|inr\s?)?(\d{1,3}(?:,\d{2,3})+|\d+)(?:\.(\d{1,2}))?\s?(k|l|lakh|lac)?(?:\/-)?(?![\p{L}\d%:/])/gu;
   for (const m of s.matchAll(re)) {
     const tail = s.slice(m.index! + m[0].length);
     if (/^\s*(?:x|×|pcs|nos|plates?|pieces|shares?|ways?|people|persons?|log|members|of us|%|am|pm|hrs?|days?|nights?)\b/i.test(tail)) continue;
