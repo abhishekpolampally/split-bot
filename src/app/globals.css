@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: var(--font-manrope), system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --color-ink: #12201b;
+  --color-muted: #55635d;
+  --color-faint: #6b7771;
+  --color-brand: #0f7b5f;
+  --color-brand-dark: #0a5a45;
+  --color-brand-deep: #0b5e48;
+  --color-head: #10302a;
+  --color-head-2: #1e4a40;
+  --color-mint: #b9d3ca;
+  --color-chat: #e7ece8;
+  --color-me: #d7f2e3;
+  --color-me-ink: #3e5a50;
+  --color-line: #eef1ef;
+  --color-line-2: #e3e8e5;
+  --color-edge: #dde3df;
+  --color-surface: #f6f8f6;
+  --color-card-edge: #cfe3d9;
+  --color-tint: #f2f9f5;
+  --color-owe: #a4471c;
+  --color-owe-ink: #8a3a15;
+  --color-owe-bg: #fbe6da;
+  --color-owed-bg: #ddf1e7;
+  --color-chip: #c5ccd3;
+}
+
+html,
+body {
+  background: #ffffff;
+  color: var(--color-ink);
+  -webkit-tap-highlight-color: transparent;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (min-width: 640px) {
+  body {
+    background: #e9eeeb;
+  }
+}
+
+@layer base {
+  button {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: default;
+  }
+  button:focus-visible,
+  a:focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+@keyframes sbdot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+.sbd1 {
+  animation: sbdot 1.1s infinite;
+}
+.sbd2 {
+  animation: sbdot 1.1s 0.15s infinite;
+}
+.sbd3 {
+  animation: sbdot 1.1s 0.3s infinite;
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+.sheet-up {
+  animation: sheet-up 0.22s ease-out;
+}

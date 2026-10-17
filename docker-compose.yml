@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: splitbot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: splitbot
+      POSTGRES_PASSWORD: splitbot
+      POSTGRES_DB: splitbot
+    ports:
+      - "5440:5432"
+    volumes:
+      - splitbot-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U splitbot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  splitbot-pg:
