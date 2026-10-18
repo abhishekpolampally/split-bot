@@ -9,6 +9,10 @@ const globalForDb = globalThis as unknown as {
 };
 
 function createDb() {
+  // Without this, pg silently falls back to localhost:5432 and every query fails.
+  if (!process.env.DATABASE_URL && process.env.VERCEL) {
+    console.error("[db] DATABASE_URL is not set for this deployment. Add it in Vercel → Settings → Environment Variables and redeploy.");
+  }
   // Serverless hosts run many instances, each with its own pool, so keep it
   // small in production and let Neon's pooled endpoint do the multiplexing.
   const pool =

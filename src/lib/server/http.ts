@@ -24,7 +24,9 @@ export function route<C>(fn: (req: Request, ctx: C) => Promise<Response>) {
       return await fn(req, ctx);
     } catch (e) {
       if (e instanceof HttpError) return json({ error: e.message }, e.status);
-      console.error(e);
+      // Drizzle wraps driver errors as "Failed query: …"; the real reason is in `cause`.
+      const cause = (e as { cause?: { message?: string; code?: string } }).cause;
+      console.error(e, cause ? `\nCaused by: ${cause.code ?? ""} ${cause.message ?? cause}` : "");
       return json({ error: "Something went wrong." }, 500);
     }
   };
