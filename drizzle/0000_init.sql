@@ -59,16 +59,6 @@ CREATE TABLE "messages" (
 	"updated_at" timestamp (3) with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "otp_codes" (
-	"id" text PRIMARY KEY NOT NULL,
-	"phone" text NOT NULL,
-	"code_hash" text NOT NULL,
-	"attempts" integer DEFAULT 0 NOT NULL,
-	"expires_at" timestamp (3) with time zone NOT NULL,
-	"used_at" timestamp (3) with time zone,
-	"created_at" timestamp (3) with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
 CREATE TABLE "proposals" (
 	"id" text PRIMARY KEY NOT NULL,
 	"group_id" text NOT NULL,
@@ -84,6 +74,15 @@ CREATE TABLE "proposals" (
 	"decided_by_member_id" text,
 	"created_at" timestamp (3) with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp (3) with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "push_tokens" (
+	"id" text PRIMARY KEY NOT NULL,
+	"user_id" text NOT NULL,
+	"token" text NOT NULL,
+	"created_at" timestamp (3) with time zone DEFAULT now() NOT NULL,
+	"last_seen_at" timestamp (3) with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "push_tokens_token_unique" UNIQUE("token")
 );
 --> statement-breakpoint
 CREATE TABLE "sessions" (
@@ -107,10 +106,12 @@ CREATE TABLE "settlements" (
 CREATE TABLE "users" (
 	"id" text PRIMARY KEY NOT NULL,
 	"phone" text NOT NULL,
+	"firebase_uid" text,
 	"name" text,
 	"upi_id" text,
 	"created_at" timestamp (3) with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "users_phone_unique" UNIQUE("phone")
+	CONSTRAINT "users_phone_unique" UNIQUE("phone"),
+	CONSTRAINT "users_firebase_uid_unique" UNIQUE("firebase_uid")
 );
 --> statement-breakpoint
 ALTER TABLE "expense_shares" ADD CONSTRAINT "expense_shares_expense_id_expenses_id_fk" FOREIGN KEY ("expense_id") REFERENCES "public"."expenses"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -124,6 +125,7 @@ ALTER TABLE "messages" ADD CONSTRAINT "messages_group_id_groups_id_fk" FOREIGN K
 ALTER TABLE "messages" ADD CONSTRAINT "messages_sender_member_id_members_id_fk" FOREIGN KEY ("sender_member_id") REFERENCES "public"."members"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "proposals" ADD CONSTRAINT "proposals_group_id_groups_id_fk" FOREIGN KEY ("group_id") REFERENCES "public"."groups"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "proposals" ADD CONSTRAINT "proposals_sender_member_id_members_id_fk" FOREIGN KEY ("sender_member_id") REFERENCES "public"."members"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "push_tokens" ADD CONSTRAINT "push_tokens_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "sessions" ADD CONSTRAINT "sessions_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "settlements" ADD CONSTRAINT "settlements_group_id_groups_id_fk" FOREIGN KEY ("group_id") REFERENCES "public"."groups"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "settlements" ADD CONSTRAINT "settlements_from_member_id_members_id_fk" FOREIGN KEY ("from_member_id") REFERENCES "public"."members"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -134,6 +136,6 @@ CREATE INDEX "members_group_idx" ON "members" USING btree ("group_id");--> state
 CREATE UNIQUE INDEX "members_group_user_uq" ON "members" USING btree ("group_id","user_id");--> statement-breakpoint
 CREATE INDEX "messages_group_id_idx" ON "messages" USING btree ("group_id","id");--> statement-breakpoint
 CREATE INDEX "messages_group_updated_idx" ON "messages" USING btree ("group_id","updated_at");--> statement-breakpoint
-CREATE INDEX "otp_phone_idx" ON "otp_codes" USING btree ("phone","created_at");--> statement-breakpoint
 CREATE INDEX "proposals_group_idx" ON "proposals" USING btree ("group_id","created_at");--> statement-breakpoint
+CREATE INDEX "push_tokens_user_idx" ON "push_tokens" USING btree ("user_id");--> statement-breakpoint
 CREATE INDEX "settlements_group_idx" ON "settlements" USING btree ("group_id","created_at");

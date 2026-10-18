@@ -41,22 +41,6 @@ export const pushTokens = pgTable(
   (t) => [index("push_tokens_user_idx").on(t.userId)],
 );
 
-// Legacy: codes from the pre-Firebase OTP login. Nothing reads it any more; drop it in a later
-// migration once the Firebase login is deployed (the old deployment still writes to it).
-export const otpCodes = pgTable(
-  "otp_codes",
-  {
-    id: id(),
-    phone: text("phone").notNull(),
-    codeHash: text("code_hash").notNull(),
-    attempts: integer("attempts").notNull().default(0),
-    expiresAt: ts("expires_at").notNull(),
-    usedAt: ts("used_at"),
-    createdAt: ts("created_at").notNull().defaultNow(),
-  },
-  (t) => [index("otp_phone_idx").on(t.phone, t.createdAt)],
-);
-
 export const sessions = pgTable("sessions", {
   tokenHash: text("token_hash").primaryKey(),
   userId: text("user_id")
