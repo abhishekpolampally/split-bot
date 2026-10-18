@@ -6,7 +6,7 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import { BotAvatar, Button, ErrorNote, Field, inputCls } from "@/components/ui";
 import { api } from "@/lib/client";
 import { track } from "@/lib/firebase/analytics";
-import { firebaseApp, firebaseConfigured } from "@/lib/firebase/client";
+import { firebaseApp, firebaseConfigured, missingFirebaseConfig } from "@/lib/firebase/client";
 import { formatPhone, normalisePhone } from "@/lib/phone";
 
 type Step = "phone" | "code" | "profile";
@@ -115,7 +115,10 @@ function LoginInner() {
 
       <div className="flex flex-1 flex-col gap-4 rounded-t-3xl bg-white px-6 pb-[max(24px,env(safe-area-inset-bottom))] pt-6 text-ink">
         {!firebaseConfigured && (
-          <ErrorNote>Login isn&apos;t set up yet: the Firebase settings are missing from this deployment.</ErrorNote>
+          <ErrorNote>
+            Login isn&apos;t set up yet. This build is missing {missingFirebaseConfig.join(", ")}. Add them in Vercel → Settings → Environment
+            Variables (Production), then redeploy.
+          </ErrorNote>
         )}
 
         {step === "phone" && (

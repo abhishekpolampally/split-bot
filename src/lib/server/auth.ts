@@ -119,7 +119,12 @@ export async function currentUser() {
     .from(schema.sessions)
     .innerJoin(schema.users, eq(schema.users.id, schema.sessions.userId))
     .where(and(eq(schema.sessions.tokenHash, hash), gt(schema.sessions.expiresAt, new Date())));
-  if (!row) return null;
+  if (!row) {
+    // Expired, logged out elsewhere, or from before a database reset: drop the dead cookie so the
+    // next page load goes straight to /login instead of loading the app and bouncing.
+    (await cookies()).delete(SESSION_COOKIE);
+    return null;
+  }
   await renewSession({ tokenHash: hash, expiresAt: row.expiresAt });
   return row.user;
 }
