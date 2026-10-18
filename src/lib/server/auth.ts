@@ -1,79 +1,60 @@
 import "server-only";
-import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { cookies, headers } from "next/headers";
-import { and, eq, gt, isNull, desc, sql } from "drizzle-orm";
+import { and, eq, gt, isNull } from "drizzle-orm";
 import { db, schema } from "@/db";
+import { normalisePhone } from "@/lib/phone";
+import { firebaseAuth } from "./firebase";
+
+export { normalisePhone };
 
 export const SESSION_COOKIE = "sb_session";
-const SESSION_DAYS = 60;
-const OTP_TTL_MIN = 10;
-const OTP_MAX_ATTEMPTS = 5;
-const OTP_MAX_PER_HOUR = 5;
+/**
+ * Sessions roll: each day someone uses the app, the session and cookie are pushed out to a full
+ * year again, so people only see the OTP screen as new users, after logging out, or after a year
+ * away. (Chrome caps cookie lifetimes at 400 days.)
+ */
+const SESSION_DAYS = 365;
+const DAY_MS = 86400_000;
+/** A Firebase ID token is valid for an hour; only accept ones from a sign-in that just happened. */
+const MAX_SIGN_IN_AGE_S = 10 * 60;
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 
-/** Normalise an Indian (or +CC) phone number to E.164-ish digits with a leading +. */
-export function normalisePhone(input: string): string | null {
-  const digits = input.replace(/[^\d+]/g, "");
-  if (digits.startsWith("+")) {
-    const d = digits.slice(1).replace(/\D/g, "");
-    return d.length >= 10 && d.length <= 15 ? "+" + d : null;
+type SignIn = { ok: true; userId: string; isNew: boolean } | { ok: false; status: number; error: string };
+
+/**
+ * Exchange a Firebase phone sign-in for a SplitBot session. Firebase proves the person owns the
+ * number (SMS + reCAPTCHA); after that the app uses its own session cookie as before.
+ */
+export async function signInWithFirebase(idToken: string): Promise<SignIn> {
+  const auth = firebaseAuth();
+  if (!auth) return { ok: false, status: 503, error: "Login isn't set up on this server yet." };
+
+  let decoded;
+  try {
+    decoded = await auth.verifyIdToken(idToken);
+  } catch {
+    return { ok: false, status: 401, error: "Your sign-in couldn't be verified. Try again." };
   }
-  const d = digits.replace(/\D/g, "").replace(/^0+/, "");
-  if (d.length === 10) return "+91" + d;
-  if (d.length === 12 && d.startsWith("91")) return "+" + d;
-  return null;
-}
-
-export async function requestOtp(phone: string): Promise<{ ok: true; devCode?: string } | { ok: false; error: string }> {
-  const [{ count }] = await db
-    .select({ count: sql<number>`count(*)::int` })
-    .from(schema.otpCodes)
-    .where(and(eq(schema.otpCodes.phone, phone), gt(schema.otpCodes.createdAt, new Date(Date.now() - 3600_000))));
-  if (count >= OTP_MAX_PER_HOUR) return { ok: false, error: "Too many codes requested. Try again in an hour." };
-
-  const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
-  await db.insert(schema.otpCodes).values({
-    phone,
-    codeHash: sha(`${phone}:${code}`),
-    expiresAt: new Date(Date.now() + OTP_TTL_MIN * 60_000),
-  });
-  await sendSms(phone, `${code} is your SplitBot code. It expires in ${OTP_TTL_MIN} minutes.`);
-  return { ok: true, devCode: otpDevMode() ? code : undefined };
-}
-
-export function otpDevMode() {
-  return process.env.OTP_DEV_MODE !== "false";
-}
-
-/** Plug an SMS provider (MSG91, Twilio, …) in here. */
-async function sendSms(phone: string, text: string) {
-  console.log(`[otp] ${phone}: ${text}`);
-}
-
-export async function verifyOtp(phone: string, code: string): Promise<{ ok: true; userId: string; isNew: boolean } | { ok: false; error: string }> {
-  const [otp] = await db
-    .select()
-    .from(schema.otpCodes)
-    .where(and(eq(schema.otpCodes.phone, phone), isNull(schema.otpCodes.usedAt), gt(schema.otpCodes.expiresAt, new Date())))
-    .orderBy(desc(schema.otpCodes.createdAt))
-    .limit(1);
-  if (!otp) return { ok: false, error: "That code has expired. Request a new one." };
-  if (otp.attempts >= OTP_MAX_ATTEMPTS) return { ok: false, error: "Too many wrong attempts. Request a new code." };
-
-  const a = Buffer.from(otp.codeHash);
-  const b = Buffer.from(sha(`${phone}:${code.trim()}`));
-  if (a.length !== b.length || !timingSafeEqual(a, b)) {
-    await db.update(schema.otpCodes).set({ attempts: otp.attempts + 1 }).where(eq(schema.otpCodes.id, otp.id));
-    return { ok: false, error: "Wrong code. Check and try again." };
+  if (decoded.firebase.sign_in_provider !== "phone" || !decoded.phone_number) {
+    return { ok: false, status: 400, error: "Sign in with your mobile number." };
   }
-  await db.update(schema.otpCodes).set({ usedAt: new Date() }).where(eq(schema.otpCodes.id, otp.id));
+  if (Date.now() / 1000 - decoded.auth_time > MAX_SIGN_IN_AGE_S) {
+    return { ok: false, status: 401, error: "That sign-in has expired. Request a new code." };
+  }
+  const phone = normalisePhone(decoded.phone_number);
+  if (!phone) return { ok: false, status: 400, error: "That phone number isn't supported." };
 
+  // Match on phone so accounts from before Firebase keep their groups and balances.
   let [user] = await db.select().from(schema.users).where(eq(schema.users.phone, phone));
   const isNew = !user;
-  if (!user) [user] = await db.insert(schema.users).values({ phone }).returning();
+  if (!user) [user] = await db.insert(schema.users).values({ phone, firebaseUid: decoded.uid }).returning();
+  else if (user.firebaseUid !== decoded.uid) {
+    [user] = await db.update(schema.users).set({ firebaseUid: decoded.uid }).where(eq(schema.users.id, user.id)).returning();
+  }
 
-  // Claim placeholder members that were added with this phone number.
+  // Link members the group owner added with this number before the person signed up.
   await db
     .update(schema.members)
     .set({ userId: user.id })
@@ -84,8 +65,12 @@ export async function verifyOtp(phone: string, code: string): Promise<{ ok: true
 
 export async function createSession(userId: string) {
   const token = randomBytes(32).toString("base64url");
-  const expiresAt = new Date(Date.now() + SESSION_DAYS * 86400_000);
+  const expiresAt = new Date(Date.now() + SESSION_DAYS * DAY_MS);
   await db.insert(schema.sessions).values({ tokenHash: sha(token), userId, expiresAt });
+  await setSessionCookie(token, expiresAt);
+}
+
+async function setSessionCookie(token: string, expiresAt: Date) {
   const jar = await cookies();
   // Secure cookies only over HTTPS (tunnels/production); plain-http LAN testing still works.
   const h = await headers();
@@ -99,6 +84,20 @@ export async function createSession(userId: string) {
   });
 }
 
+/**
+ * Extend an active session to a full year again, at most once a day (so the chat's polling
+ * doesn't write on every request). Call with the session row an API request just loaded.
+ */
+export async function renewSession(session: { tokenHash: string; expiresAt: Date }) {
+  const now = Date.now();
+  if (session.expiresAt.getTime() > now + (SESSION_DAYS - 1) * DAY_MS) return;
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  if (!token || sha(token) !== session.tokenHash) return;
+  const expiresAt = new Date(now + SESSION_DAYS * DAY_MS);
+  await db.update(schema.sessions).set({ expiresAt }).where(eq(schema.sessions.tokenHash, session.tokenHash));
+  await setSessionCookie(token, expiresAt);
+}
+
 export async function destroySession() {
   const jar = await cookies();
   const token = jar.get(SESSION_COOKIE)?.value;
@@ -106,14 +105,21 @@ export async function destroySession() {
   jar.delete(SESSION_COOKIE);
 }
 
+/** Hash of the session cookie, as stored in `sessions.token_hash`, or null when logged out. */
+export async function sessionTokenHash() {
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  return token ? sha(token) : null;
+}
+
 export async function currentUser() {
-  const jar = await cookies();
-  const token = jar.get(SESSION_COOKIE)?.value;
-  if (!token) return null;
+  const hash = await sessionTokenHash();
+  if (!hash) return null;
   const [row] = await db
-    .select({ user: schema.users })
+    .select({ user: schema.users, expiresAt: schema.sessions.expiresAt })
     .from(schema.sessions)
     .innerJoin(schema.users, eq(schema.users.id, schema.sessions.userId))
-    .where(and(eq(schema.sessions.tokenHash, sha(token)), gt(schema.sessions.expiresAt, new Date())));
-  return row?.user ?? null;
+    .where(and(eq(schema.sessions.tokenHash, hash), gt(schema.sessions.expiresAt, new Date())));
+  if (!row) return null;
+  await renewSession({ tokenHash: hash, expiresAt: row.expiresAt });
+  return row.user;
 }

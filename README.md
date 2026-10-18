@@ -18,9 +18,26 @@ Copy `.env.example` to `.env.local` if it isn't there already. The only required
 
 Put `OPENAI_API_KEY=sk-...` in `.env.local` and restart. Without a key, SplitBot uses its built-in rule parser (`src/lib/bot/rules.ts`). That parser handles the common phrasings already, so the app works fully without the key. With a key, messages go to `OPENAI_MODEL` (default `gpt-5-mini`) using a strict JSON schema. If the call fails it falls back to the rule parser.
 
-### Login / OTP
+### Firebase: login, analytics, performance, push
 
-Login is phone number + 6-digit OTP. No SMS provider is wired up yet (`sendSms` in `src/lib/server/auth.ts`), so with `OTP_DEV_MODE=true` the code shows on the login screen and in the server log. That's fine for a private beta with friends. Set it to `false` once SMS is connected.
+Login is mobile number + SMS code through **Firebase Phone Auth**. The browser signs in with Firebase (invisible reCAPTCHA + SMS), posts the ID token to `/api/auth/firebase`, and the server verifies it and issues SplitBot's own session cookie (HttpOnly). Sessions roll: each day of use extends them to a full year, so people only see the OTP screen as new users, after logging out, or after a year away. Accounts are matched by phone number, so users from before Firebase keep their groups.
+
+Setup in the [Firebase console](https://console.firebase.google.com) for the `split-bot` project:
+
+1. **Upgrade to Blaze** (pay as you go). Firebase only sends real SMS on Blaze; India is charged per SMS.
+2. **Authentication → Sign-in method → Phone → Enable.** Under *Phone numbers for testing*, add a few test numbers with fixed codes for development (no SMS, no cost).
+3. **Authentication → Settings → Authorized domains:** add your Vercel domain(s). `localhost` is there by default.
+4. **Project settings → Your apps → Add app → Web**, then copy the config into the `NEXT_PUBLIC_FIREBASE_*` variables (see `.env.example`).
+5. **Analytics:** enable Google Analytics for the project; the web config then includes `measurementId`.
+6. **Push:** Project settings → Cloud Messaging → *Web Push certificates* → generate a key pair → `NEXT_PUBLIC_FIREBASE_VAPID_KEY`. Then Project settings → Service accounts → *Generate new private key* → `FIREBASE_CLIENT_EMAIL` and `FIREBASE_PRIVATE_KEY` (server only).
+
+Analytics logs page views plus app events (`login`, `group_create`, `member_add`, `invite_share`, `invite_join`, `bot_request`, `expense_confirm`, `settle_record`, `reminder_send`, `push_enable`); no phone numbers, names or message text are sent. Performance Monitoring records real page loads and API timings from phones. Server errors stay in Vercel's logs.
+
+Push notifications (turned on per device from **Profile**) go out for new chat messages, new and confirmed splits, reminders and recorded payments. iPhones only get them after SplitBot is added to the Home Screen (iOS 16.4+). The service worker, and so push, runs in production builds only.
+
+### Who can add people
+
+Only a group's **owner** (its creator) adds people, and always by mobile number: **Choose from contacts** (Chrome on Android, via the Contact Picker API) or **Add by mobile number**, which checks the exact number against SplitBot's users (no partial search, rate limited). People not on SplitBot yet are added by name and linked automatically when they sign up with that number. Everyone else joins through the group's invite link; a joiner can only claim a spot saved for their own number (or an old spot added without one).
 
 ## Using it with friends tonight
 
@@ -41,7 +58,7 @@ cloudflared tunnel --url http://localhost:3000
 
 Share the `https://….trycloudflare.com` URL. Session cookies become `Secure` automatically over HTTPS.
 
-Flow: create a group → add friends by name (a phone number is optional and auto-links them when they sign up) → share the invite link from **Group info** → each friend logs in and taps "I'm Riya" to claim their name.
+Flow: create a group → add friends from your contacts or by number (they're linked when they sign up) → or share the invite link from **Group info** so friends can join themselves.
 
 ## What the bot understands
 
@@ -76,7 +93,7 @@ When something is ambiguous (an unknown name, two Riyas, "split 3 ways" in a 5-p
 src/app/                 pages (chat list, /g/[id] chat, balances, settle, info, login, join) + /api routes
 src/lib/split/           engine, debt simplification, types (unit-tested)
 src/lib/bot/             rule parser, OpenAI parser, spec builder (clarifications), orchestrator
-src/lib/server/          auth (OTP + sessions), ledger, proposals, messages
+src/lib/server/          auth (Firebase sign-in + sessions), membership, push, ledger, proposals, messages
 src/db/schema.ts         Drizzle schema; migrations in drizzle/
 public/sw.js             service worker (app shell + offline page; API is never cached)
 ```
@@ -85,5 +102,5 @@ public/sw.js             service worker (app shell + offline page; API is never 
 
 ## Not in V1 yet
 
-Receipt photo parsing (phase 2), push notifications, read receipts and reactions, 1:1 chats, real SMS delivery, a dispute window, and CSV export.
+Receipt photo parsing (phase 2), read receipts and reactions, 1:1 chats, a dispute window, and CSV export.
 # split-bot

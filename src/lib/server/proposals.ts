@@ -8,6 +8,7 @@ import type { SplitSpec } from "@/lib/split/types";
 import { HttpError } from "./http";
 import { groupLedger } from "./ledger";
 import { botSay, postMessage, touchProposalMessages } from "./messages";
+import { notifyGroup } from "./push";
 
 export async function createProposal(opts: {
   groupId: string;
@@ -39,6 +40,15 @@ export async function createProposal(opts: {
     replyToId: opts.sourceMessageId,
     data: opts.intro ? { intro: opts.intro } : undefined,
   });
+  notifyGroup(
+    opts.groupId,
+    { exceptMemberId: opts.senderMemberId },
+    {
+      body: `${opts.editsExpenseId ? "Edit proposed" : "New split"}: ${opts.spec.description} · ${formatINR(result.totalPaise)}. Open to check your share.`,
+      url: `/g/${opts.groupId}`,
+      tag: `chat-${opts.groupId}`,
+    },
+  );
   return p;
 }
 
@@ -120,6 +130,11 @@ export async function confirmProposal(groupId: string, proposalId: string, me: M
       .set({ status: "confirmed", result, expenseId: expense.id, decidedByMemberId: me.id, updatedAt: new Date() })
       .where(eq(schema.proposals.id, p.id));
     await touchProposalMessages(p.id, tx);
+    notifyGroup(
+      groupId,
+      { memberIds: lines.map((l) => l.memberId).filter((m) => m !== me.id) },
+      { body: `${me.name} confirmed “${p.spec.description}” (${formatINR(result.totalPaise)}). Balances are updated.`, url: `/g/${groupId}/balances` },
+    );
     return expense.id;
   });
 

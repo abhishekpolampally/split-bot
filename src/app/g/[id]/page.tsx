@@ -8,6 +8,7 @@ import { Composer, type ComposerHandle } from "@/components/chat/Composer";
 import { ExpenseSheet } from "@/components/chat/ExpenseSheet";
 import { MessageItem, Typing } from "@/components/chat/Messages";
 import { Avatar, Header, Loading } from "@/components/ui";
+import { track } from "@/lib/firebase/analytics";
 import { api, dayLabel } from "@/lib/client";
 import type { MemberView, MessageView } from "@/lib/types";
 
@@ -103,6 +104,7 @@ export default function GroupChat() {
 
   async function send(body: string, replyToId: number | null) {
     await api(`/api/groups/${id}/messages`, { body: { body, replyToId } });
+    if (/@splitbot\b/i.test(body)) track("bot_request", { edit: replyToId != null });
     if (/@splitbot\b/i.test(body)) setBotBusy("Reading that…");
     await poll();
   }

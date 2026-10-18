@@ -4,11 +4,12 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Avatar, BotAvatar, Button, ErrorNote, Loading } from "@/components/ui";
 import { api, useApi } from "@/lib/client";
+import { track } from "@/lib/firebase/analytics";
 
 interface Invite {
   group: { id: string; name: string; color: string };
   alreadyMember: boolean;
-  members: { id: string; name: string; color: string; isPlaceholder: boolean }[];
+  members: { id: string; name: string; color: string; isPlaceholder: boolean; canClaim: boolean }[];
 }
 
 export default function Join() {
@@ -28,6 +29,7 @@ export default function Join() {
     setErr(null);
     try {
       const { groupId } = await api<{ groupId: string }>(`/api/invite/${token}`, { body: { claimMemberId: pick === "new" ? null : pick } });
+      track("invite_join", { claimed: pick !== "new" });
       router.replace(`/g/${groupId}`);
     } catch (e) {
       setErr((e as Error).message);
@@ -37,7 +39,8 @@ export default function Join() {
 
   if (error) return <p className="p-8 text-center text-owe">{error}</p>;
   if (!data || data.alreadyMember) return <Loading />;
-  const placeholders = data.members.filter((m) => m.isPlaceholder);
+  // Only spots without a number, or saved for this person's number, can be claimed.
+  const placeholders = data.members.filter((m) => m.canClaim);
 
   return (
     <main className="flex flex-1 flex-col bg-head text-white">

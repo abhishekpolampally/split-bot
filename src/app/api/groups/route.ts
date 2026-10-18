@@ -3,9 +3,10 @@ import { and, desc, eq, gt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "@/db";
 import { PALETTE, pickColor } from "@/lib/colors";
-import { normalisePhone } from "@/lib/server/auth";
+import { normalisePhone } from "@/lib/phone";
 import { body, HttpError, json, requireUser, route } from "@/lib/server/http";
 import { groupLedger } from "@/lib/server/ledger";
+import { addMemberByPhone } from "@/lib/server/membership";
 import { postMessage } from "@/lib/server/messages";
 
 export const GET = route(async () => {
@@ -55,8 +56,9 @@ export const GET = route(async () => {
 
 const Create = z.object({
   name: z.string().trim().min(1, "Give the group a name.").max(50),
+  // Picked from contacts or looked up by number; a phone number is required for everyone.
   members: z
-    .array(z.object({ name: z.string().trim().min(1).max(40), phone: z.string().max(20).optional() }))
+    .array(z.object({ name: z.string().trim().max(40).optional(), phone: z.string().trim().min(10).max(20) }))
     .max(30)
     .default([]),
 });
@@ -80,14 +82,8 @@ export const POST = route(async (req) => {
 
     let i = 1;
     for (const m of input.members) {
-      const phone = m.phone ? normalisePhone(m.phone) : null;
-      let userId: string | null = null;
-      if (phone) {
-        const [existing] = await tx.select().from(schema.users).where(eq(schema.users.phone, phone));
-        if (existing && existing.id !== user.id) userId = existing.id;
-        if (existing?.id === user.id) continue;
-      }
-      await tx.insert(schema.members).values({ groupId: g.id, userId, name: m.name, phone, color: PALETTE[i++ % PALETTE.length] });
+      if (normalisePhone(m.phone) === user.phone) continue; // the owner is already in
+      await addMemberByPhone(tx, { groupId: g.id, name: m.name, phone: m.phone, colorIndex: i++ });
     }
     return g;
   });

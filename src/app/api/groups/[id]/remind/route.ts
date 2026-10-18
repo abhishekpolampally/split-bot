@@ -3,6 +3,7 @@ import { formatINR } from "@/lib/money";
 import { body, HttpError, json, requireMember, route } from "@/lib/server/http";
 import { groupLedger } from "@/lib/server/ledger";
 import { postMessage } from "@/lib/server/messages";
+import { notifyGroup } from "@/lib/server/push";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -20,5 +21,6 @@ export const POST = route<Ctx>(async (req, ctx) => {
     body: `Friendly nudge, ${debtor.name}: you owe ${me.name} ${formatINR(t.amountPaise)}. Tap Settle up to pay via UPI.`,
     data: { actions: ["settle"], reminder: true },
   });
+  notifyGroup(group.id, { memberIds: [memberId] }, { body: `${me.name} sent a reminder: you owe ${formatINR(t.amountPaise)}.`, url: `/g/${group.id}/settle` });
   return json({ ok: true });
 });

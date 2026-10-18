@@ -4,6 +4,7 @@ import { db, schema } from "@/db";
 import { formatINR } from "@/lib/money";
 import { body, HttpError, json, requireMember, route } from "@/lib/server/http";
 import { postMessage } from "@/lib/server/messages";
+import { notifyGroup } from "@/lib/server/push";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -35,5 +36,10 @@ export const POST = route<Ctx>(async (req, ctx) => {
     body: `${from.name} paid ${to.name} ${formatINR(input.amountPaise)}${input.method === "cash" ? " in cash" : " via UPI"}. Recorded by ${me.name}.`,
     data: { settlement: true, actions: ["balances"] },
   });
+  notifyGroup(
+    group.id,
+    { memberIds: [from.id, to.id], exceptMemberId: me.id },
+    { body: `${from.name} paid ${to.name} ${formatINR(input.amountPaise)}. Balances are updated.`, url: `/g/${group.id}/balances` },
+  );
   return json({ ok: true });
 });

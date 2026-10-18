@@ -1,10 +1,10 @@
 import "server-only";
 import { NextResponse } from "next/server";
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt } from "drizzle-orm";
 import type { ZodType } from "zod";
 import { db, schema } from "@/db";
 import type { Group, Member, User } from "@/db/schema";
-import { currentUser } from "./auth";
+import { currentUser, renewSession, sessionTokenHash } from "./auth";
 
 export class HttpError extends Error {
   constructor(
@@ -38,15 +38,23 @@ export async function requireUser(): Promise<User> {
   return user;
 }
 
+/** Session, user, membership and group in one round trip; this runs on every chat poll. */
 export async function requireMember(groupId: string): Promise<{ user: User; group: Group; me: Member }> {
-  const user = await requireUser();
+  const hash = await sessionTokenHash();
+  if (!hash) throw new HttpError(401, "Please log in.");
   const [row] = await db
-    .select({ group: schema.groups, me: schema.members })
-    .from(schema.members)
+    .select({ user: schema.users, group: schema.groups, me: schema.members, expiresAt: schema.sessions.expiresAt })
+    .from(schema.sessions)
+    .innerJoin(schema.users, eq(schema.users.id, schema.sessions.userId))
+    .innerJoin(schema.members, and(eq(schema.members.userId, schema.users.id), eq(schema.members.groupId, groupId)))
     .innerJoin(schema.groups, eq(schema.groups.id, schema.members.groupId))
-    .where(and(eq(schema.members.groupId, groupId), eq(schema.members.userId, user.id)));
-  if (!row) throw new HttpError(404, "Group not found.");
-  return { user, ...row };
+    .where(and(eq(schema.sessions.tokenHash, hash), gt(schema.sessions.expiresAt, new Date())));
+  if (!row) {
+    await requireUser(); // tells an expired session (401) apart from a group you're not in (404)
+    throw new HttpError(404, "Group not found.");
+  }
+  await renewSession({ tokenHash: hash, expiresAt: row.expiresAt });
+  return { user: row.user, group: row.group, me: row.me };
 }
 
 export async function body<T>(req: Request, schema: ZodType<T>): Promise<T> {

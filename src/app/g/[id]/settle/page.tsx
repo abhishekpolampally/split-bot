@@ -4,6 +4,7 @@ import { useParams } from "next/navigation";
 import { ArrowRight, CircleCheck } from "lucide-react";
 import { useState } from "react";
 import { Avatar, Button, Header, Loading } from "@/components/ui";
+import { track } from "@/lib/firebase/analytics";
 import { api } from "@/lib/client";
 import { formatINR, upiLink } from "@/lib/money";
 import type { Transfer } from "@/lib/types";
@@ -26,6 +27,7 @@ export default function Settle() {
     setError(null);
     try {
       await api(`/api/groups/${id}/settlements`, { body: { fromMemberId: t.from, toMemberId: t.to, amountPaise: t.amountPaise, method } });
+      track("settle_record", { method });
       setUpiFor(null);
       await reload();
     } catch (e) {
@@ -39,6 +41,7 @@ export default function Settle() {
     setBusy(key(t) + "remind");
     try {
       await api(`/api/groups/${id}/remind`, { body: { memberId: t.from } });
+      track("reminder_send", {});
       setReminded({ ...reminded, [key(t)]: true });
     } catch (e) {
       setError((e as Error).message);

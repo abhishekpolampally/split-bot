@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "@/db";
 import { body, json, requireMember, route } from "@/lib/server/http";
+import { isOwner } from "@/lib/server/membership";
 import { postMessage } from "@/lib/server/messages";
 import { memberViews } from "@/lib/server/views";
 
@@ -9,10 +10,11 @@ type Ctx = { params: Promise<{ id: string }> };
 
 export const GET = route<Ctx>(async (_req, ctx) => {
   const { id } = await ctx.params;
-  const { group, me } = await requireMember(id);
+  const { user, group, me } = await requireMember(id);
   return json({
     group: { id: group.id, name: group.name, color: group.color, inviteToken: group.inviteToken },
     meId: me.id,
+    isOwner: isOwner(group, user),
     members: await memberViews(group.id),
   });
 });

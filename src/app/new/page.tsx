@@ -1,15 +1,19 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { Trash2, UserPlus } from "lucide-react";
+import { X } from "lucide-react";
 import { useState } from "react";
-import { Button, ErrorNote, Field, Header, inputCls } from "@/components/ui";
+import { AddPeople, type Person } from "@/components/AddPeople";
+import { Avatar, Button, ErrorNote, Field, Header, inputCls } from "@/components/ui";
 import { api } from "@/lib/client";
+import { track } from "@/lib/firebase/analytics";
+import { PALETTE } from "@/lib/colors";
+import { formatPhone, normalisePhone } from "@/lib/phone";
 
 export default function NewGroup() {
   const router = useRouter();
   const [name, setName] = useState("");
-  const [people, setPeople] = useState<{ name: string; phone: string }[]>([{ name: "", phone: "" }]);
+  const [people, setPeople] = useState<(Person & { name: string })[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -17,17 +21,25 @@ export default function NewGroup() {
     setBusy(true);
     setError(null);
     try {
-      const members = people
-        .filter((p) => p.name.trim())
-        .map((p) => ({ name: p.name.trim(), phone: p.phone.trim() || undefined }));
-      const names = members.map((m) => m.name.toLowerCase());
-      if (new Set(names).size !== names.length) throw new Error("Two people have the same name. Add a surname or nickname.");
-      const { id } = await api<{ id: string }>("/api/groups", { body: { name, members } });
+      const { id } = await api<{ id: string }>("/api/groups", { body: { name, members: people } });
+      track("group_create", { members: people.length + 1 });
       router.replace(`/g/${id}/info?created=1`);
     } catch (e) {
       setError((e as Error).message);
       setBusy(false);
     }
+  }
+
+  /** People are only collected here; the server re-checks everything when the group is created. */
+  async function collect(p: Person) {
+    const phone = normalisePhone(p.phone)!;
+    const display = p.name?.trim();
+    if (!display) throw new Error("Add a name for this person.");
+    if (people.some((x) => normalisePhone(x.phone) === phone)) throw new Error(`${display} is already on the list.`);
+    if (people.some((x) => x.name.toLowerCase() === display.toLowerCase())) {
+      throw new Error(`There's already a ${display} on the list. Use a surname or nickname.`);
+    }
+    setPeople((cur) => [...cur, { name: display, phone }]);
   }
 
   return (
@@ -41,46 +53,25 @@ export default function NewGroup() {
         }}
       >
         <Field label="Group name">
-          <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="Toit Friday, Flat 4B, Goa trip…" autoFocus maxLength={50} />
+          <input id="group-name" className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="Toit Friday, Flat 4B, Goa trip…" autoFocus maxLength={50} />
         </Field>
 
-        <div className="flex flex-col gap-2">
-          <span className="text-[13px] font-bold">Who&apos;s in it?</span>
-          <span className="text-xs text-muted">
-            Add friends by name now; they can claim their name from the invite link. A phone number links them automatically when they sign
-            up.
-          </span>
+        <section className="flex flex-col gap-3 rounded-2xl border border-line-2 bg-white p-4">
+          <AddPeople label="Who's in it?" onAdd={collect} />
+          <p className="text-xs text-muted">You can also add people later, or share the invite link once the group exists.</p>
           {people.map((p, i) => (
-            <div key={i} className="flex gap-2">
-              <input
-                className={inputCls + " flex-[1.2]"}
-                placeholder={["Kabir", "Riya", "Neha", "Name"][Math.min(i, 3)]}
-                value={p.name}
-                onChange={(e) => setPeople(people.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
-                maxLength={40}
-              />
-              <input
-                className={inputCls + " flex-1"}
-                placeholder="Phone (opt.)"
-                inputMode="tel"
-                value={p.phone}
-                onChange={(e) => setPeople(people.map((x, j) => (j === i ? { ...x, phone: e.target.value } : x)))}
-              />
-              {people.length > 1 && (
-                <button type="button" aria-label="Remove" className="px-1 text-muted" onClick={() => setPeople(people.filter((_, j) => j !== i))}>
-                  <Trash2 size={18} />
-                </button>
-              )}
+            <div key={p.phone} className="flex items-center gap-3 border-t border-line pt-2">
+              <Avatar name={p.name} color={PALETTE[(i + 1) % PALETTE.length]} size={32} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-bold">{p.name}</div>
+                <div className="text-xs text-muted">{formatPhone(p.phone)}</div>
+              </div>
+              <button type="button" aria-label={`Remove ${p.name}`} className="p-1 text-muted" onClick={() => setPeople(people.filter((x) => x.phone !== p.phone))}>
+                <X size={18} />
+              </button>
             </div>
           ))}
-          <button
-            type="button"
-            className="flex items-center gap-2 self-start py-2 text-sm font-bold text-brand"
-            onClick={() => setPeople([...people, { name: "", phone: "" }])}
-          >
-            <UserPlus size={18} /> Add another
-          </button>
-        </div>
+        </section>
 
         <ErrorNote>{error}</ErrorNote>
         <Button type="submit" loading={busy} disabled={!name.trim()} className="h-12 text-base">

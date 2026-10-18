@@ -1,6 +1,6 @@
 // SplitBot service worker: app-shell caching so the PWA opens instantly and
 // shows an offline notice instead of the browser's error page.
-const CACHE = "splitbot-v1";
+const CACHE = "splitbot-v2";
 const OFFLINE_URL = "/offline";
 
 self.addEventListener("install", (event) => {
@@ -44,4 +44,40 @@ self.addEventListener("fetch", (event) => {
       ),
     );
   }
+});
+
+// Push notifications from Firebase Cloud Messaging. The server sends data-only messages
+// ({ title, body, url, tag }), so this worker decides how they look on every browser.
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = { data: { body: event.data ? event.data.text() : "" } };
+  }
+  const d = payload.data || {};
+  const n = payload.notification || {};
+  const title = d.title || n.title || "SplitBot";
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: d.body || n.body || "",
+      icon: "/icons/192",
+      badge: "/icons/192",
+      tag: d.tag || undefined,
+      renotify: Boolean(d.tag),
+      data: { url: d.url || "/" },
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || "/", self.location.origin).href;
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
+      const open = wins.find((w) => w.url.startsWith(self.location.origin));
+      if (open) return open.navigate(target).then((w) => (w || open).focus());
+      return self.clients.openWindow(target);
+    }),
+  );
 });

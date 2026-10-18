@@ -4,6 +4,7 @@ import { AlertTriangle, Check, CornerUpLeft } from "lucide-react";
 import { useState } from "react";
 import { Avatar, BotAvatar, Button, cx } from "@/components/ui";
 import { api } from "@/lib/client";
+import { track } from "@/lib/firebase/analytics";
 import { initials } from "@/lib/colors";
 import { formatINR } from "@/lib/money";
 import { describeRule } from "@/lib/split/engine";
@@ -34,6 +35,7 @@ export function ProposalCard({ msg, p }: { msg: MessageView; p: ProposalView }) 
     setError(null);
     try {
       await api(`/api/groups/${chat.groupId}/proposals/${p.id}`, { body: { action } });
+      if (action === "confirm") track("expense_confirm", { rule: spec.rule, members: res.lines.length });
       chat.refresh();
     } catch (e) {
       setError((e as Error).message);

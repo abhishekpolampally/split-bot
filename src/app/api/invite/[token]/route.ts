@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db, schema } from "@/db";
 import { PALETTE } from "@/lib/colors";
 import { body, HttpError, json, requireUser, route } from "@/lib/server/http";
+import { canClaim, claimableBy } from "@/lib/server/membership";
 import { postMessage } from "@/lib/server/messages";
 
 type Ctx = { params: Promise<{ token: string }> };
@@ -22,7 +23,8 @@ export const GET = route<Ctx>(async (_req, ctx) => {
   return json({
     group: { id: g.id, name: g.name, color: g.color },
     alreadyMember: Boolean(mine),
-    members: members.map((m) => ({ id: m.id, name: m.name, color: m.color, isPlaceholder: !m.userId })),
+    // canClaim: spots the joiner may take over (no number on file, or their own number).
+    members: members.map((m) => ({ id: m.id, name: m.name, color: m.color, isPlaceholder: !m.userId, canClaim: canClaim(m, user) })),
   });
 });
 
@@ -43,9 +45,11 @@ export const POST = route<Ctx>(async (req, ctx) => {
     const claimed = await db
       .update(schema.members)
       .set({ userId: user.id, phone: user.phone })
-      .where(and(eq(schema.members.id, claimMemberId), eq(schema.members.groupId, g.id), isNull(schema.members.userId)))
+      .where(
+        and(eq(schema.members.id, claimMemberId), eq(schema.members.groupId, g.id), isNull(schema.members.userId), claimableBy(user)),
+      )
       .returning();
-    if (!claimed.length) throw new HttpError(409, "Someone already claimed that name.");
+    if (!claimed.length) throw new HttpError(409, "You can't take that spot. It's already claimed or saved for a different number.");
     await postMessage({ groupId: g.id, kind: "system", body: `${claimed[0].name} joined via invite link.` });
     return json({ groupId: g.id });
   }

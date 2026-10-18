@@ -19,11 +19,30 @@ const id = () =>
 export const users = pgTable("users", {
   id: id(),
   phone: text("phone").notNull().unique(),
+  /** Firebase Auth uid of the phone sign-in; set on first Firebase login. */
+  firebaseUid: text("firebase_uid").unique(),
   name: text("name"),
   upiId: text("upi_id"),
   createdAt: ts("created_at").notNull().defaultNow(),
 });
 
+/** Firebase Cloud Messaging tokens, one per browser/device a user enabled notifications on. */
+export const pushTokens = pgTable(
+  "push_tokens",
+  {
+    id: id(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    token: text("token").notNull().unique(),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    lastSeenAt: ts("last_seen_at").notNull().defaultNow(),
+  },
+  (t) => [index("push_tokens_user_idx").on(t.userId)],
+);
+
+// Legacy: codes from the pre-Firebase OTP login. Nothing reads it any more; drop it in a later
+// migration once the Firebase login is deployed (the old deployment still writes to it).
 export const otpCodes = pgTable(
   "otp_codes",
   {

@@ -1,15 +1,18 @@
 "use client";
 
 import { useParams, useSearchParams } from "next/navigation";
-import { Copy, Share2, UserPlus } from "lucide-react";
+import { Copy, Share2 } from "lucide-react";
 import { Suspense, useState } from "react";
-import { Avatar, Button, ErrorNote, Field, Header, inputCls, Loading } from "@/components/ui";
+import { AddPeople } from "@/components/AddPeople";
+import { Avatar, Button, Field, Header, inputCls, Loading } from "@/components/ui";
 import { api, useApi, useBrowserValue } from "@/lib/client";
+import { track } from "@/lib/firebase/analytics";
 import type { MemberView } from "@/lib/types";
 
 interface GroupInfo {
   group: { id: string; name: string; color: string; inviteToken: string };
   meId: string;
+  isOwner: boolean;
   members: MemberView[];
 }
 
@@ -18,10 +21,6 @@ function Info() {
   const created = useSearchParams().get("created");
   const { data, reload } = useApi<GroupInfo>(`/api/groups/${id}`);
   const [copied, setCopied] = useState(false);
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const origin = useBrowserValue(() => location.origin, "");
 
   if (!data) return <Loading />;
@@ -32,6 +31,7 @@ function Info() {
     if (navigator.share) {
       try {
         await navigator.share({ title: "SplitBot", text: shareText });
+        track("invite_share", { via: "share" });
         return;
       } catch {
         /* cancelled */
@@ -42,21 +42,6 @@ function Info() {
     setTimeout(() => setCopied(false), 2000);
   }
 
-  async function add() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api(`/api/groups/${id}/members`, { body: { name, phone: phone || undefined } });
-      setName("");
-      setPhone("");
-      await reload();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
 
   return (
     <>
@@ -64,7 +49,7 @@ function Info() {
       <div className="no-scrollbar flex flex-1 flex-col gap-4 overflow-y-auto bg-surface p-4">
         {created && (
           <div className="rounded-2xl border border-card-edge bg-tint p-4 text-sm leading-relaxed text-brand-deep">
-            <b>Group created.</b> Share the invite link so friends can join and claim their names. You can start logging expenses straight away;
+            <b>Group created.</b> Add friends from your contacts or by number, or share the invite link so they can join. You can start logging expenses straight away;
             they&apos;ll see everything once they join.
           </div>
         )}
@@ -81,6 +66,7 @@ function Info() {
               className="flex-1"
               onClick={async () => {
                 await navigator.clipboard.writeText(link);
+                track("invite_share", { via: "copy" });
                 setCopied(true);
                 setTimeout(() => setCopied(false), 2000);
               }}
@@ -92,6 +78,7 @@ function Info() {
             href={`https://wa.me/?text=${encodeURIComponent(shareText)}`}
             target="_blank"
             rel="noreferrer"
+            onClick={() => track("invite_share", { via: "whatsapp" })}
             className="text-center text-sm font-bold text-brand"
           >
             Send on WhatsApp
@@ -113,25 +100,20 @@ function Info() {
           ))}
         </section>
 
-        <form
-          className="flex flex-col gap-3 rounded-2xl border border-line-2 bg-white p-4"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void add();
-          }}
-        >
-          <h2 className="flex items-center gap-2 text-sm font-bold">
-            <UserPlus size={16} /> Add someone
-          </h2>
-          <div className="flex gap-2">
-            <input className={inputCls + " flex-[1.2]"} placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} maxLength={40} />
-            <input className={inputCls + " flex-1"} placeholder="Phone (opt.)" inputMode="tel" value={phone} onChange={(e) => setPhone(e.target.value)} />
-          </div>
-          <ErrorNote>{error}</ErrorNote>
-          <Button type="submit" variant="outline" loading={busy} disabled={!name.trim()}>
-            Add to group
-          </Button>
-        </form>
+        <section className="rounded-2xl border border-line-2 bg-white p-4">
+          {data.isOwner ? (
+            <AddPeople
+              onAdd={async (p) => {
+                await api(`/api/groups/${id}/members`, { body: p });
+                await reload();
+              }}
+            />
+          ) : (
+            <p className="text-[13px] leading-relaxed text-muted">
+              Only the group owner can add people. To bring someone in, share the invite link above.
+            </p>
+          )}
+        </section>
 
         <RenameGroup key={data.group.name} id={id} current={data.group.name} onDone={reload} />
       </div>
