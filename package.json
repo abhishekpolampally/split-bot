@@ -22,6 +22,7 @@
     "drizzle-orm": "^0.45.4",
     "firebase": "^13.0.0",
     "firebase-admin": "^14.5.0",
+    "jose": "^6.2.12",
     "lucide-react": "^1.58.0",
     "next": "16.4.2",
     "openai": "^7.34.0",

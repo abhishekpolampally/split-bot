@@ -4,7 +4,7 @@ import { cookies, headers } from "next/headers";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { normalisePhone } from "@/lib/phone";
-import { firebaseAuth } from "./firebase";
+import { verifyFirebaseIdToken, type FirebaseIdToken } from "./firebase";
 
 export { normalisePhone };
 
@@ -28,22 +28,21 @@ type SignIn = { ok: true; userId: string; isNew: boolean } | { ok: false; status
  * number (SMS + reCAPTCHA); after that the app uses its own session cookie as before.
  */
 export async function signInWithFirebase(idToken: string): Promise<SignIn> {
-  const auth = firebaseAuth();
-  if (!auth) return { ok: false, status: 503, error: "Login isn't set up on this server yet." };
-
-  let decoded;
+  let decoded: FirebaseIdToken | null;
   try {
-    decoded = await auth.verifyIdToken(idToken);
-  } catch {
+    decoded = await verifyFirebaseIdToken(idToken);
+  } catch (e) {
+    console.warn("[auth] Firebase ID token rejected:", (e as Error).message);
     return { ok: false, status: 401, error: "Your sign-in couldn't be verified. Try again." };
   }
-  if (decoded.firebase.sign_in_provider !== "phone" || !decoded.phone_number) {
+  if (!decoded) return { ok: false, status: 503, error: "Login isn't set up on this server yet." };
+  if (decoded.signInProvider !== "phone" || !decoded.phoneNumber) {
     return { ok: false, status: 400, error: "Sign in with your mobile number." };
   }
-  if (Date.now() / 1000 - decoded.auth_time > MAX_SIGN_IN_AGE_S) {
+  if (Date.now() / 1000 - decoded.authTime > MAX_SIGN_IN_AGE_S) {
     return { ok: false, status: 401, error: "That sign-in has expired. Request a new code." };
   }
-  const phone = normalisePhone(decoded.phone_number);
+  const phone = normalisePhone(decoded.phoneNumber);
   if (!phone) return { ok: false, status: 400, error: "That phone number isn't supported." };
 
   // Match on phone so accounts from before Firebase keep their groups and balances.
