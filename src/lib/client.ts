@@ -20,7 +20,8 @@ export async function api<T = unknown>(path: string, init?: { method?: string; b
   });
   const data = await res.json().catch(() => ({}));
   if (res.status === 401 && typeof window !== "undefined" && !location.pathname.startsWith("/login")) {
-    window.location.assign(`/login?next=${encodeURIComponent(location.pathname)}`);
+    // Session gone: a full page load clears the stale data, and replace() keeps the dead page out of history.
+    window.location.replace(`/login?next=${encodeURIComponent(location.pathname)}`);
   }
   if (!res.ok) throw new ApiError(res.status, (data as { error?: string }).error ?? "Something went wrong.");
   return data as T;

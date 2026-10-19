@@ -1,5 +1,5 @@
 import "server-only";
-import { and, desc, eq, gt, ilike, isNull, or } from "drizzle-orm";
+import { and, desc, eq, gt, gte, ilike, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import { db, schema } from "@/db";
 import type { Group, Member } from "@/db/schema";
 import { formatINR } from "@/lib/money";
@@ -8,10 +8,12 @@ import { botSay, postMessage, setBotBusy, touchMessage, touchProposalMessages } 
 import { createProposal, deleteExpense } from "@/lib/server/proposals";
 import { computeSplit } from "@/lib/split/engine";
 import type { SplitSpec } from "@/lib/split/types";
+import { addDays, istDayStart, shortDay } from "./dates";
+import { ANY_BILL, type BillCandidate, keywordCategories, keywordStems, matchBills, MIN_REF_CONFIDENCE, narrows } from "./expenseMatch";
 import { llmEnabled, parseWithLLM } from "./llm";
-import { findAmounts, parseWithRules } from "./rules";
-import { buildSpec, type Question } from "./spec";
-import type { Intent, Overrides, ParsedMessage, Roster } from "./types";
+import { findAmounts, parseExpenseRef, parseWithRules } from "./rules";
+import { buildSpec, type ClarifyOption, type Question } from "./spec";
+import type { ExpenseRef, Intent, Overrides, ParsedMessage, Roster } from "./types";
 
 const MAX_QUESTIONS = 2;
 
@@ -55,7 +57,8 @@ async function run(input: MentionInput) {
     const data = (replyTo.data ?? {}) as { answered?: unknown; pending?: { text: string; overrides: Overrides; round: number } };
     if (!data.answered && data.pending) {
       await touchMessage(replyTo.id, { ...data, answered: { label: `“${text.replace(/@splitbot\b/gi, "").trim()}”`, byMemberId: sender.id } });
-      text = `${data.pending.text}\n${text.replace(/@splitbot\b/gi, "")}`;
+      // ";" keeps the answer its own part of the message ("me+1 chai 120; me and riya").
+      text = `${data.pending.text}; ${text.replace(/@splitbot\b/gi, "").trim()}`;
       ov = data.pending.overrides;
       round = data.pending.round;
       input = { ...input, text };
@@ -75,9 +78,9 @@ async function run(input: MentionInput) {
     case "create_expense":
       return createFlow({ ...input, overrides: ov }, parsed, roster, ov, round);
     case "edit_expense":
-      return editFlow(input, parsed, members);
+      return editFlow(input, parsed, members, roster);
     case "delete_expense":
-      return deleteFlow(input, parsed);
+      return deleteFlow(input, parsed, roster);
     case "query_balance":
       return balanceReply(group, sender, members, parsed.queryMember);
     case "query_spend":
@@ -181,9 +184,11 @@ export async function answerClarification(group: Group, me: Member, messageId: n
   if (!data.pending) return { ok: false };
 
   // Delete confirmation
-  if (patch.deleteExpenseId || patch.keep) {
+  if (patch.deleteExpenseId || patch.cancelProposalId || patch.keep) {
     if (patch.deleteExpenseId) {
       await deleteExpense(group.id, patch.deleteExpenseId, me);
+    } else if (patch.cancelProposalId) {
+      await cancelProposal(group.id, patch.cancelProposalId, me);
     } else {
       await botSay(group.id, "Okay, leaving it as it is.");
     }
@@ -219,14 +224,28 @@ async function latestPending(groupId: string) {
   return p ?? null;
 }
 
-async function editFlow(input: MentionInput, parsed: ParsedMessage, members: Member[]) {
+async function editFlow(input: MentionInput, parsed: ParsedMessage, members: Member[], roster: Roster) {
   const { group, sender } = input;
   let base: SplitSpec | null = null;
   let supersede: string | null = null;
   let editsExpenseId: string | null = null;
+  const pickBill = (b: BillCandidate) => {
+    base = b.spec;
+    if (b.kind === "proposal") supersede = b.id;
+    else editsExpenseId = b.id;
+  };
+  // The LLM doesn't say which bill, so read that from the text ourselves.
+  const ref = parsed.expenseRef ?? parseExpenseRef(input.text, roster, "edit");
 
-  // Reply-to a card wins; otherwise the latest pending proposal; otherwise the latest expense.
-  if (input.replyToId) {
+  // Which bill: one picked from a "which one?" question; the card being replied to; a bill the
+  // message names ("from yesterday's cab"); the proposal on screen; or "that" = the latest.
+  const picked = input.overrides?.editBill;
+  if (picked) {
+    const bill = await loadBill(group.id, picked);
+    if (!bill) return botSay(group.id, "That bill was deleted or already changed.");
+    pickBill(bill);
+  }
+  if (!base && input.replyToId) {
     const [m] = await db.select().from(schema.messages).where(eq(schema.messages.id, input.replyToId));
     if (m?.proposalId) {
       const [p] = await db.select().from(schema.proposals).where(eq(schema.proposals.id, m.proposalId));
@@ -239,6 +258,19 @@ async function editFlow(input: MentionInput, parsed: ParsedMessage, members: Mem
       }
     }
   }
+  if (!base && (narrows(ref) || (ref.ordinal ?? 0) > 1)) {
+    const found = await resolveBill(group.id, ref);
+    if (found.kind === "vague") return botSay(group.id, VAGUE_EDIT);
+    if (found.kind === "none" || found.kind === "many") {
+      const options = (found.kind === "none" ? found.recent : found.bills).map((b) => ({
+        label: billLabel(b),
+        patch: { editBill: { kind: b.kind, id: b.id } },
+      }));
+      if (!options.length) return botSay(group.id, `I couldn't find ${describeRef(ref, roster.members)} to change.`);
+      return askAboutBills(input, found.kind === "none" ? `I couldn't find ${describeRef(ref, roster.members)}. Which bill should I change?` : "Which one should I change?", options, "Never mind", input.overrides ?? {});
+    }
+    pickBill(found.bill);
+  }
   if (!base) {
     const p = await latestPending(group.id);
     if (p) {
@@ -246,22 +278,16 @@ async function editFlow(input: MentionInput, parsed: ParsedMessage, members: Mem
       supersede = p.id;
     }
   }
-  if (!base) {
-    const [e] = await db
-      .select()
-      .from(schema.expenses)
-      .where(and(eq(schema.expenses.groupId, group.id), isNull(schema.expenses.deletedAt)))
-      .orderBy(desc(schema.expenses.createdAt))
-      .limit(1);
-    if (e) {
-      base = e.spec;
-      editsExpenseId = e.id;
-    }
+  if (!base && ref.ordinal === 1) {
+    const [latest] = matchBills(await loadBills(group.id, ANY_BILL), ANY_BILL);
+    if (latest) pickBill(latest);
+    else return botSay(group.id, "There's nothing to edit yet. Log an expense first, e.g. “@splitbot cab 640, me and Neha”.");
   }
-  if (!base) return botSay(group.id, "There's nothing to edit yet. Log an expense first, e.g. “@splitbot cab 640, me and Neha”.");
+  if (!base) return botSay(group.id, VAGUE_EDIT);
+  const original: SplitSpec = base;
 
   const ids = new Set(members.map((m) => m.id));
-  const spec: SplitSpec = structuredClone(base);
+  const spec: SplitSpec = structuredClone(original);
   if (parsed.payer && ids.has(parsed.payer)) spec.payerId = parsed.payer;
   if (parsed.totalPaise) {
     spec.totalPaise = parsed.totalPaise;
@@ -276,6 +302,15 @@ async function editFlow(input: MentionInput, parsed: ParsedMessage, members: Mem
     spec.rule = "equal";
     delete spec.exact;
     delete spec.percents;
+    delete spec.shares;
+  }
+  if (parsed.rule === "percent" && parsed.percents.length) {
+    spec.rule = "percent";
+    spec.percents = Object.fromEntries(parsed.percents.filter((p) => ids.has(p.member)).map((p) => [p.member, p.percent]));
+    spec.participants = Object.keys(spec.percents);
+    delete spec.items;
+    delete spec.charges;
+    delete spec.exact;
     delete spec.shares;
   }
   if (parsed.participants.length) spec.participants = parsed.participants.filter((x) => ids.has(x));
@@ -299,7 +334,7 @@ async function editFlow(input: MentionInput, parsed: ParsedMessage, members: Mem
 
   const result = computeSplit(spec);
   if (!result.ok) return botSay(group.id, `I couldn't apply that edit: ${result.errors.join(" ")}`);
-  if (JSON.stringify(spec) === JSON.stringify(base)) {
+  if (JSON.stringify(spec) === JSON.stringify(original)) {
     return botSay(group.id, "I couldn't tell what to change. Try “@splitbot make that 2000”, “actually Kabir paid” or “remove Riya”.");
   }
 
@@ -322,46 +357,184 @@ async function editFlow(input: MentionInput, parsed: ParsedMessage, members: Mem
   });
 }
 
-async function deleteFlow(input: MentionInput, parsed: ParsedMessage) {
-  const { group, sender } = input;
-  const kw = parsed.queryKeyword?.trim();
+const VAGUE_DELETE =
+  "Which bill should I delete? Add a detail so I can find it, e.g. “@splitbot delete yesterday's cab”, “…the 640 one”, “…the one Kabir paid” or “…the last one”.";
+const VAGUE_EDIT =
+  "Which bill should I change? Reply to its card, or name it, e.g. “@splitbot remove Neha from yesterday's cab” or “@splitbot make the dinner 2000”.";
 
-  const pending = await latestPending(group.id);
-  if (pending && (!kw || pending.spec.description.toLowerCase().includes(kw.toLowerCase()))) {
-    await db
-      .update(schema.proposals)
-      .set({ status: "cancelled", decidedByMemberId: sender.id, updatedAt: new Date() })
-      .where(eq(schema.proposals.id, pending.id));
-    await touchProposalMessages(pending.id);
-    return postMessage({ groupId: group.id, kind: "system", body: `Cancelled “${pending.spec.description}”. Nothing was added.` });
+const toCandidate = {
+  proposal: (p: typeof schema.proposals.$inferSelect): BillCandidate => ({
+    kind: "proposal",
+    id: p.id,
+    spec: { ...p.spec, totalPaise: p.spec.totalPaise ?? p.result.totalPaise },
+    createdAt: p.createdAt,
+  }),
+  expense: (e: typeof schema.expenses.$inferSelect): BillCandidate => ({
+    kind: "expense",
+    id: e.id,
+    spec: { ...e.spec, totalPaise: e.totalPaise },
+    createdAt: e.createdAt,
+  }),
+};
+
+/**
+ * Retrieval: the bills that could match `ref`, as open proposals from the last day plus logged
+ * expenses. The clues become SQL conditions, so the database returns a handful of rows however
+ * long the group's history is (expenses_group_idx covers group + date). The keyword filter here
+ * is deliberately loose (any word, anywhere); matchBills does the exact ranking afterwards.
+ */
+async function loadBills(groupId: string, ref: ExpenseRef): Promise<BillCandidate[]> {
+  const e = schema.expenses;
+  const conds: (SQL | undefined)[] = [eq(e.groupId, groupId), isNull(e.deletedAt)];
+  if (ref.day) conds.push(gte(e.createdAt, istDayStart(ref.day.from)), lt(e.createdAt, istDayStart(addDays(ref.day.to, 1))));
+  if (ref.amountPaise) {
+    conds.push(or(eq(e.totalPaise, ref.amountPaise), sql`${e.spec}->'items' @> ${JSON.stringify([{ amountPaise: ref.amountPaise }])}::jsonb`));
   }
+  if (ref.payer) conds.push(eq(e.payerMemberId, ref.payer));
+  if (ref.member) conds.push(or(eq(e.payerMemberId, ref.member), sql`${e.spec}->'participants' ? ${ref.member}`));
+  if (ref.keyword) {
+    const stems = keywordStems(ref.keyword);
+    const cats = keywordCategories(ref.keyword);
+    conds.push(
+      or(
+        ...stems.map((k) => ilike(e.description, `%${k}%`)),
+        ...stems.map((k) => sql`exists (select 1 from jsonb_array_elements(coalesce(${e.spec}->'items', '[]'::jsonb)) i where i->>'name' ilike ${`%${k}%`})`),
+        cats.length ? inArray(e.category, cats) : undefined,
+      ),
+    );
+  }
+  const [proposals, expenses] = await Promise.all([
+    db
+      .select()
+      .from(schema.proposals)
+      .where(
+        and(
+          eq(schema.proposals.groupId, groupId),
+          eq(schema.proposals.status, "proposed"),
+          gt(schema.proposals.createdAt, new Date(Date.now() - 24 * 3600_000)),
+        ),
+      ),
+    db.select().from(e).where(and(...conds)).orderBy(desc(e.createdAt)).limit(50),
+  ]);
+  // Open proposals are few (a day's worth), so matchBills filters those in memory.
+  return [...proposals.map(toCandidate.proposal), ...expenses.map(toCandidate.expense)];
+}
 
-  const conds = [eq(schema.expenses.groupId, group.id), isNull(schema.expenses.deletedAt)];
-  if (kw) conds.push(or(ilike(schema.expenses.description, `%${kw}%`), eq(schema.expenses.category, kw))!);
-  const [e] = await db
+async function loadBill(groupId: string, which: { kind: "expense" | "proposal"; id: string }): Promise<BillCandidate | null> {
+  if (which.kind === "proposal") {
+    const [p] = await db
+      .select()
+      .from(schema.proposals)
+      .where(and(eq(schema.proposals.id, which.id), eq(schema.proposals.groupId, groupId), eq(schema.proposals.status, "proposed")));
+    return p ? toCandidate.proposal(p) : null;
+  }
+  const [x] = await db
     .select()
     .from(schema.expenses)
-    .where(and(...conds))
-    .orderBy(desc(schema.expenses.createdAt))
-    .limit(1);
-  if (!e) return botSay(group.id, kw ? `I couldn't find an expense matching “${kw}”.` : "There's nothing to cancel.");
+    .where(and(eq(schema.expenses.id, which.id), eq(schema.expenses.groupId, groupId), isNull(schema.expenses.deletedAt)));
+  return x ? toCandidate.expense(x) : null;
+}
 
-  await postMessage({
-    groupId: group.id,
+type Resolved =
+  | { kind: "vague" }
+  | { kind: "none"; recent: BillCandidate[] }
+  | { kind: "many"; bills: BillCandidate[]; total: number }
+  | { kind: "one"; bill: BillCandidate };
+
+/**
+ * Decide which bill `ref` means. Too vague → ask for detail without touching the database.
+ * Otherwise retrieve and match: one bill, a few to pick from, or none (with the latest few so the
+ * person can still pick in a tap).
+ */
+async function resolveBill(groupId: string, ref: ExpenseRef): Promise<Resolved> {
+  if (ref.confidence < MIN_REF_CONFIDENCE) return { kind: "vague" };
+  const matches = matchBills(await loadBills(groupId, ref), ref);
+  if (!matches.length) {
+    const recent = narrows(ref) ? matchBills(await loadBills(groupId, ANY_BILL), ANY_BILL).slice(0, 3) : [];
+    return { kind: "none", recent };
+  }
+  // Several fit and the message didn't say which ("the last cab" would have).
+  if (matches.length > 1 && narrows(ref) && !ref.ordinal) return { kind: "many", bills: matches.slice(0, 3), total: matches.length };
+  return { kind: "one", bill: matches[0] };
+}
+
+async function cancelProposal(groupId: string, proposalId: string, by: Member) {
+  const cancelled = await db
+    .update(schema.proposals)
+    .set({ status: "cancelled", decidedByMemberId: by.id, updatedAt: new Date() })
+    .where(and(eq(schema.proposals.id, proposalId), eq(schema.proposals.groupId, groupId), eq(schema.proposals.status, "proposed")))
+    .returning();
+  if (!cancelled.length) return botSay(groupId, "That split was already confirmed or cancelled.");
+  await touchProposalMessages(proposalId);
+  await postMessage({ groupId, kind: "system", body: `Cancelled “${cancelled[0].spec.description}”. Nothing was added.` });
+}
+
+const billLabel = (b: BillCandidate) =>
+  `${b.spec.description} · ${formatINR(b.spec.totalPaise ?? 0)} · ${shortDay(b.createdAt)}${b.kind === "proposal" ? " (not confirmed)" : ""}`;
+const deleteOption = (b: BillCandidate): ClarifyOption => ({
+  label: billLabel(b),
+  patch: b.kind === "proposal" ? { cancelProposalId: b.id } : { deleteExpenseId: b.id },
+});
+
+/** "“cab” for ₹640 paid by Kabir from yesterday": what we looked for, said back. */
+function describeRef(ref: ExpenseRef, members: Roster["members"]) {
+  const name = (id: string) => members.find((m) => m.id === id)?.name ?? "them";
+  return [
+    ref.keyword ? `“${ref.keyword}”` : "a bill",
+    ref.amountPaise ? `for ${formatINR(ref.amountPaise)}` : null,
+    ref.payer ? `paid by ${name(ref.payer)}` : null,
+    ref.member ? `with ${name(ref.member)}` : null,
+    ref.day ? (ref.day.from === ref.day.to && !/^(today|yesterday|the day)/.test(ref.day.label) ? `on ${ref.day.label}` : `from ${ref.day.label}`) : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** A question with one button per bill, plus a way out. */
+function askAboutBills(input: MentionInput, body: string, options: ClarifyOption[], keepLabel: string, overrides: Overrides) {
+  return postMessage({
+    groupId: input.group.id,
     kind: "clarify",
-    body: `Delete “${e.description}” (${formatINR(e.totalPaise)})? This changes everyone's balances.`,
+    body,
     replyToId: input.sourceMessageId,
     data: {
-      question: {
-        text: `Delete “${e.description}” (${formatINR(e.totalPaise)})?`,
-        options: [
-          { label: "Yes, delete it", patch: { deleteExpenseId: e.id } },
-          { label: "Keep it", patch: { keep: true } },
-        ],
-      },
-      pending: { text: input.text, senderMemberId: sender.id, sourceMessageId: input.sourceMessageId, overrides: {}, round: 1 },
+      question: { text: body, options: [...options, { label: keepLabel, patch: { keep: true } }] },
+      pending: { text: input.text, senderMemberId: input.sender.id, sourceMessageId: input.sourceMessageId, overrides, round: 1 },
     },
   });
+}
+
+async function deleteFlow(input: MentionInput, parsed: ParsedMessage, roster: Roster) {
+  const { group, sender } = input;
+  // The LLM only returns a keyword, so read the other clues from the text ourselves.
+  if (/\b(everything|all\s+(?:the\s+|my\s+|our\s+)?(?:bills|expenses|entries))\b/i.test(input.text)) {
+    return botSay(group.id, "I can only delete one bill at a time, so nothing gets wiped by accident. Which one? e.g. “@splitbot delete yesterday's cab”.");
+  }
+  const ref = parsed.expenseRef ?? { ...parseExpenseRef(input.text, roster, "delete"), keyword: parsed.queryKeyword ?? null };
+  const found = await resolveBill(group.id, ref);
+
+  if (found.kind === "vague") return botSay(group.id, VAGUE_DELETE);
+  if (found.kind === "none") {
+    if (!narrows(ref)) return botSay(group.id, "There's nothing to delete yet.");
+    if (!found.recent.length) return botSay(group.id, `I couldn't find ${describeRef(ref, roster.members)}, and there's nothing logged yet.`);
+    return askAboutBills(input, `I couldn't find ${describeRef(ref, roster.members)}. Did you mean one of these?`, found.recent.map(deleteOption), "Keep everything", {});
+  }
+  if (found.kind === "many") {
+    const more = found.total > found.bills.length ? ` Showing the latest ${found.bills.length} of ${found.total}.` : "";
+    return askAboutBills(input, `Which one should I delete?${more}`, found.bills.map(deleteOption), "Keep everything", {});
+  }
+
+  const bill = found.bill;
+  // A proposal nobody confirmed hasn't touched balances, so cancel it straight away.
+  if (bill.kind === "proposal") return cancelProposal(group.id, bill.id, sender);
+  const total = formatINR(bill.spec.totalPaise ?? 0);
+  return askAboutBills(
+    input,
+    `Delete “${bill.spec.description}” (${total}, ${shortDay(bill.createdAt)})? This changes everyone's balances.`,
+    [{ label: "Yes, delete it", patch: { deleteExpenseId: bill.id } }],
+    "Keep it",
+    {},
+  );
 }
 
 async function balanceReply(group: Group, sender: Member, members: Member[], focus: string | null) {

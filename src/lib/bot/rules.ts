@@ -1,6 +1,7 @@
 import { parseAmountToPaise } from "@/lib/money";
 import type { Category, SplitCharge } from "@/lib/split/types";
-import { emptyParse, type Intent, type Overrides, type ParsedMessage, type Roster } from "./types";
+import { findDayRange } from "./dates";
+import { emptyParse, type ExpenseRef, type Intent, type Overrides, type ParsedMessage, type Roster } from "./types";
 
 /**
  * Rule-based parser. Used when no OpenAI key is configured, or as a fallback
@@ -18,8 +19,11 @@ const STOP = new Set([
   "paid", "pay", "pays", "rest", "rs", "inr", "rupees", "each", "ways", "way", "people", "only", "had",
   "have", "has", "got", "share", "shares", "per", "person", "head", "please", "pls", "plz", "bill",
   "divide", "divided", "among", "add", "log", "karo", "kar", "do", "de", "dena", "baki", "baaki", "barabar",
-  "ne", "ka", "ki", "ke", "hai", "tha", "mein", "me", "ko", "just", "also", "too", "total", "hisaab",
+  "ne", "ka", "ki", "ke", "hai", "tha", "mein", "me", "ko", "just", "also", "too", "total", "hisaab", "liye", "liya",
 ]);
+// Words after "for" / "with" that aren't people, so "cab 500 for office" doesn't ask who Office is.
+const NOT_PEOPLE =
+  /^(friends?|family|office|work|home|house|flat|kids|guests|team|everyone|trip|night|day|week|month|year|today|tomorrow|tonight|weekend|birthday|party|dinner|lunch|breakfast|two|three|four|five|six|both|them|all|us|you)$/;
 const DRINK_WORDS = [
   "beer", "beers", "wine", "drink", "drinks", "alcohol", "cocktail", "cocktails", "whisky", "whiskey",
   "vodka", "rum", "gin", "pint", "pints", "shot", "shots", "booze", "daaru", "daru", "sangria", "mojito",
@@ -31,7 +35,7 @@ const WHOLE_BILL = /^(dinner|lunch|breakfast|brunch|meal|food|party|outing|trip|
 const SEGMENT_SPLIT = /(?<!\d),|,(?!\d{2})|[;\n]|\bthen\b|\bplus\b/;
 
 const CATEGORY_WORDS: [Category, RegExp][] = [
-  ["food", /\b(dinner|lunch|breakfast|brunch|food|pizza|biryani|swiggy|zomato|snacks?|coffee|chai|cafe|restaurant|meal|dessert|cake|paneer|chicken|naan|dal|momos?)\b/],
+  ["food", /\b(dinner|lunch|breakfast|brunch|food|pizza|biryani|swiggy|zomato|snacks?|coffee|chai|cafe|restaurant|meal|dessert|cake|paneer|chicken|naan|dal|momos?|khana|nashta)\b/],
   ["drinks", /\b(beer|wine|drinks?|bar|pub|cocktails?|daaru|daru|booze)\b/],
   ["travel", /\b(cab|uber|ola|rapido|auto|taxi|petrol|diesel|fuel|toll|flight|train|bus|metro|parking|travel|ride)\b/],
   ["stay", /\b(hotel|airbnb|stay|hostel|room|resort|villa)\b/],
@@ -41,6 +45,9 @@ const CATEGORY_WORDS: [Category, RegExp][] = [
   ["entertainment", /\b(movie|movies|tickets?|concert|netflix|spotify|game|bowling|club|party)\b/],
   ["shopping", /\b(shopping|amazon|flipkart|myntra|gift|clothes)\b/],
 ];
+
+// A regex fragment matching a run of names: "riya", "me and neha", "kabir, riya & neha".
+const NAMES_RE = `([\\p{L}']+(?:\\s*(?:,|&|and|aur|\\+)\\s*[\\p{L}']+)*)`;
 
 interface NameHit {
   start: number;
@@ -104,7 +111,7 @@ class Scanner {
   }
 }
 
-export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, forceIntent?: Intent): ParsedMessage {
+export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, forceIntent?: Intent, now = new Date()): ParsedMessage {
   const scanner = new Scanner(roster, ov.nameMap);
   // Work on a lowercase copy; "blank" spans we've consumed so later passes skip them.
   let t = (" " + raw.replace(/@splitbot\b/gi, " ").replace(/\s+/g, " ").trim() + " ").toLowerCase();
@@ -116,7 +123,18 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
 
   const amountsIn = (s: string) => findAmounts(s);
   const hasAmount = amountsIn(t).length > 0;
-  const intent = forceIntent ?? detectIntent(t, hasAmount);
+  // "remove Neha", "drop me from the cab": taking a person out of a bill is an edit, not a delete.
+  const removesPerson = [...t.matchAll(/\b(?:remove|drop|exclude|take\s+out)\s+([\p{L}']+(?:\s+[\p{L}']+)?)/gu)].some((m) =>
+    scanner.scan(m[1]).some((h) => !h.all && h.ids.length > 0),
+  );
+  // "riya wasn't there", "only me and neha": changing who's in a bill.
+  const absentRe = /(?<![\p{L}])([\p{L}']+)\s+(?:wasn'?t|was\s+not|weren'?t|were\s+not|didn'?t\s+(?:come|join|go)|did\s+not\s+(?:come|join|go)|skipped|missed)(?![\p{L}])/gu;
+  const absentIds = [...t.matchAll(absentRe)].flatMap((m) => scanner.scan(m[1]).filter((h) => !h.all && h.ids.length === 1).flatMap((h) => h.ids));
+  const onlyIds = (() => {
+    const m = t.match(new RegExp(`\\bonly\\s+${NAMES_RE}`, "u"));
+    return m ? scanner.scan(m[1]).filter((h) => h.ids.length > 0).flatMap((h) => h.ids) : [];
+  })();
+  const intent = forceIntent ?? detectIntent(t, hasAmount, removesPerson, absentIds.length > 0 || onlyIds.length > 0);
   const out = emptyParse(intent);
   out.confidence = 0.9;
 
@@ -131,8 +149,7 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
   };
   const namesIn = (s: string) => firstIds(scanner.scan(s));
 
-  // A regex fragment matching a run of names: "riya", "me and neha", "kabir, riya & neha".
-  const NAMES = `([\\p{L}']+(?:\\s*(?:,|&|and|aur|\\+)\\s*[\\p{L}']+)*)`;
+  const NAMES = NAMES_RE;
 
   // ---- non-expense intents ------------------------------------------------
   if (intent === "settle_up" || intent === "help") return out;
@@ -142,8 +159,16 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
     out.queryMember = others[0] ?? null;
     return out;
   }
-  if (intent === "query_spend" || intent === "delete_expense") {
-    out.queryKeyword = keywordAfter(t, intent === "delete_expense");
+  if (intent === "delete_expense") {
+    const ref = expenseRefIn(t, scanner, sender, now, "delete");
+    out.expenseRef = ref;
+    out.queryKeyword = ref.keyword;
+    out.queryMember = ref.payer ?? ref.member;
+    finishUnresolved(out, unresolved);
+    return out;
+  }
+  if (intent === "query_spend") {
+    out.queryKeyword = keywordAfter(t);
     out.queryMember = namesIn(t).find((id) => id !== sender) ?? null;
     if (out.queryKeyword) {
       const cat = categorise(out.queryKeyword);
@@ -153,6 +178,8 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
   }
 
   // ---- payer ---------------------------------------------------------------
+  // "maine 600 diya" → "maine diya 600", so the payer pattern sees the words together.
+  t = t.replace(/(?<![\p{L}])(maine|mene|humne)\s+((?:₹|rs\.?)?\s?\d[\d.,]*k?)\s+(diya|bhara|paid)(?![\p{L}])/u, "$1 $3 $2");
   const payerRes = [
     new RegExp(`\\bpaid\\s+by\\s+${NAMES}`, "u"),
     new RegExp(`(?<![\\p{L}])([\\p{L}']+)\\s+(?:has\\s+)?(?:paid|payed|pays|covered|ne\\s+(?:diya|pay\\s+kiya|paid|bhara))(?![\\p{L}])`, "u"),
@@ -179,19 +206,46 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
 
   // ---- edits ---------------------------------------------------------------
   if (intent === "edit_expense") {
+    // "2200 not 2400": the amount after "not" is the old one.
+    for (const m of t.matchAll(/\bnot\s+(?:₹\s?|rs\.?\s?)?\d[\d,]*(?:\.\d{1,2})?k?(?![\p{L}\d])/gu)) blank(m.index!, m.index! + m[0].length);
     for (const m of t.matchAll(new RegExp(`\\b(?:add|include|plus|also)\\s+${NAMES}`, "gu"))) {
       out.addParticipants.push(...namesIn(m[1]));
       blank(m.index!, m.index! + m[0].length);
     }
-    for (const m of t.matchAll(new RegExp(`\\b(?:remove|exclude|without|drop|minus|except|not)\\s+${NAMES}`, "gu"))) {
+    // "Kabir paid for that, not me" is about the payer, so "not me" doesn't take anyone out.
+    const removeWords = /\b(?:paid|payed|covered)\b/i.test(raw) ? "remove|exclude|without|drop|minus|except" : "remove|exclude|without|drop|minus|except|not";
+    for (const m of t.matchAll(new RegExp(`\\b(?:${removeWords})\\s+${NAMES}`, "gu"))) {
       out.removeParticipants.push(...namesIn(m[1]));
       blank(m.index!, m.index! + m[0].length);
+    }
+    for (const m of t.matchAll(absentRe)) {
+      const ids = namesIn(m[1]);
+      if (!ids.length) continue;
+      out.removeParticipants.push(...ids);
+      blank(m.index!, m.index! + m[0].length);
+    }
+    // "make it 60-40 between me and neha"
+    const ratio = t.match(/(?<![\d.])(\d{1,3})\s*[-/:]\s*(\d{1,3})(?:\s*[-/:]\s*(\d{1,3}))?(?![\d%])/);
+    if (ratio) {
+      const parts = [ratio[1], ratio[2], ratio[3]].filter(Boolean).map(Number);
+      if (parts.reduce((a, b) => a + b, 0) === 100) {
+        blank(ratio.index!, ratio.index! + ratio[0].length);
+        const who = t.match(new RegExp(`\\b(?:between|among|amongst|for)\\s+${NAMES}`, "u"));
+        const order = who ? namesIn(who[1]) : [];
+        if (order.length === parts.length) {
+          out.rule = "percent";
+          out.percents = order.map((id, i) => ({ member: id, percent: parts[i] }));
+          blank(who!.index!, who!.index! + who![0].length);
+        }
+      }
     }
     const amts = amountsIn(t);
     if (amts.length) out.totalPaise = amts[amts.length - 1].paise;
     if (/\b(equal|equally|evenly|barabar)\b/.test(t)) out.rule = "equal";
     const only = t.match(new RegExp(`\\bonly\\s+${NAMES}`, "u"));
     if (only) out.participants = namesIn(only[1]);
+    // Which bill to change: "remove Neha from the cab", "make yesterday's dinner 2000", "that".
+    out.expenseRef = expenseRefIn(t, scanner, sender, now, "edit");
     finishUnresolved(out, unresolved);
     return out;
   }
@@ -381,8 +435,28 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
   // Description.
   let description = items[0]?.label || "";
   if (!description) description = labelFrom(instructionText, instHits, scanner);
+  // "kabir and i had coffee for 360"
+  if (!description && claims.length) description = claims[0].keyword;
   out.description = description ? capitalise(description) : null;
   out.category = categorise(raw.toLowerCase());
+
+  // "snacks 300 for priya" with no Priya in the group: ask rather than split among everyone.
+  const labelWords = new Set([...segs.map((x) => x.label), description].join(" ").split(/\s+/));
+  for (const m of t.matchAll(new RegExp(`\\b(?:for|with|between|among|amongst)\\s+${NAMES}`, "gu"))) {
+    for (const w of m[1].split(/\s*(?:,|&|and|aur|\+)\s*/)) {
+      const person =
+        /^\p{L}{3,}$/u.test(w) &&
+        !scanner.isKnown(w) &&
+        !(w in (ov.nameMap ?? {})) &&
+        !STOP.has(w) &&
+        !labelWords.has(w) &&
+        !NOT_PEOPLE.test(w) &&
+        !DRINK_WORDS.includes(w) &&
+        !CATEGORY_WORDS.some(([, r]) => r.test(w)) &&
+        !chargeType(w);
+      if (person) unresolved.set(w, []);
+    }
+  }
 
   // ---- decide the rule ---------------------------------------------------------------
   let participants = instMembers;
@@ -497,14 +571,29 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
 
 // ---------------------------------------------------------------------------------------------
 
-function detectIntent(t: string, hasAmount: boolean): Intent {
+// Words that only ever mean "delete", and ones that also show up in edits ("remove Riya").
+const DELETE_VERB = /\b(delete|cancel|undo|scrap|discard|erase|trash|get rid of|hata(?:o|do|dena)?|mita(?:o|do|dena)?)\b/;
+const SOFT_DELETE_VERB = /\b(remove|drop|ignore|take (?:off|out))\b/;
+// Words that point at an existing bill rather than describe a new one.
+const POINTS_AT_BILL = /\b(that|this|it|last|latest|previous|the|one|expense|split|entry|bill|my|our)\b/;
+
+function detectIntent(t: string, hasAmount: boolean, removesPerson: boolean, changesPeople: boolean): Intent {
   if (/\b(settle|settlement|settle up|hisaab|hisab|clear (?:it|all|up))\b/.test(t) && !hasAmount) return "settle_up";
-  if (/\b(cancel|delete|remove|undo|scrap|discard|ignore)\b/.test(t) && !hasAmount && /\b(that|this|it|last|the|one|expense|split|entry)\b/.test(t))
-    return "delete_expense";
+  // An amount after a delete word picks out a bill ("delete the 640 cab"); it isn't a new expense.
+  const startsWithVerb = new RegExp(`^\\s*(?:please\\s+|pls\\s+)?${DELETE_VERB.source}`).test(t);
+  if (!removesPerson) {
+    if (DELETE_VERB.test(t) && (!hasAmount || startsWithVerb || POINTS_AT_BILL.test(t))) return "delete_expense";
+    if (SOFT_DELETE_VERB.test(t) && (POINTS_AT_BILL.test(t) || (!hasAmount && /\b(remove|drop)\b/.test(t)))) return "delete_expense";
+  }
   if (
-    /\b(actually|instead|make (?:it|that)|change|edit|correction|correct|update|fix|wrong|not\s+\d)\b/.test(t) ||
+    /\b(actually|instead|make (?:it|that)|change|edit|correction|correct|update|fix|wrong)\b|\bnot\s+\d/.test(t) ||
+    // "make yesterday's dinner 2000": a message opening with "make" corrects a bill.
+    /^\s*(?:please\s+|pls\s+)?make\b/.test(t) ||
     /\b(add|include|remove|exclude|drop)\b/.test(t) && !hasAmount ||
-    (/\bpaid\b/.test(t) && /\b(that|it|this)\b/.test(t) && !hasAmount)
+    (/\bpaid\b/.test(t) && /\b(that|it|this)\b/.test(t) && !hasAmount) ||
+    // "riya wasn't there", "only me and neha in the cab", "split the pizza equally"
+    (!hasAmount && changesPeople) ||
+    (!hasAmount && /\b(split|divide)\b.*\b(equal|equally|evenly|barabar)\b/.test(t))
   )
     return "edit_expense";
   if (!hasAmount) {
@@ -515,7 +604,7 @@ function detectIntent(t: string, hasAmount: boolean): Intent {
   return "create_expense";
 }
 
-function keywordAfter(t: string, del: boolean): string | null {
+function keywordAfter(t: string): string | null {
   const words = t
     .replace(/[?.!]/g, " ")
     .split(/\s+/)
@@ -525,8 +614,108 @@ function keywordAfter(t: string, del: boolean): string | null {
         !STOP.has(w) &&
         !/^(cancel|delete|remove|undo|scrap|discard|ignore|one|last|expense|entry|how|much|did|we|spend|spent|spending|on|so|far|this|trip|total|what|was|our|my|whole|kharcha)$/.test(w),
     );
-  if (!words.length) return del ? null : null;
+  if (!words.length) return null;
   return words.join(" ");
+}
+
+// Words in a request that say "a bill" without saying which one.
+const REF_FILLER =
+  /^(cancel|delete|remove|undo|scrap|discard|ignore|erase|trash|drop|get|rid|take|off|out|hata|hatao|hatado|hatadena|mita|mitao|mitado|mitadena|one|ones|last|latest|previous|recent|newest|most|second|2nd|before|but|expense|expenses|entry|entries|bill|bills|split|item|transaction|record|thing|stuff|something|that|this|it|let's|lets|let|us|we|our|my|can|you|kindly|karo|kar|do|de|dena|wala|wali|vala|vali|please|pls|plz|again|wrong|mistake|by|mistakenly|accidentally|added|logged|made|created|entered|did|done|bought|went|payer|amount|price|rule|people|names|oops|sorry|wait|hey|ok|okay|arre|yaar|bhai|no|just|everything|all)$/;
+
+/** How precisely a set of clues picks out one bill. "The last one" is precise; "the bill" isn't. */
+function refConfidence(r: ExpenseRef): number {
+  let c = 0;
+  if (r.ordinal) c += 0.9;
+  if (r.day) c += 0.5;
+  if (r.amountPaise) c += 0.6;
+  if (r.payer) c += 0.5;
+  if (r.member) c += 0.4;
+  // A long run of leftover words usually means we didn't understand the message.
+  if (r.keyword) c += r.keyword.split(" ").length <= 2 ? 0.6 : 0.3;
+  return Math.min(1, Math.round(c * 100) / 100);
+}
+
+/**
+ * The clues in a message about which existing bill it means. `t` is the lowercased message.
+ * In "edit" mode amounts and names are the change being asked for ("make it 2000", "Kabir paid"),
+ * not clues, and the keyword only comes from phrases that point at a bill ("from the cab").
+ */
+function expenseRefIn(text: string, scanner: Scanner, sender: string, now: Date, mode: "delete" | "edit"): ExpenseRef {
+  let t = text;
+  const blank = (start: number, end: number) => {
+    t = t.slice(0, start) + " ".repeat(end - start) + t.slice(end);
+  };
+  const ref: ExpenseRef = { ordinal: null, keyword: null, amountPaise: null, payer: null, member: null, day: null, confidence: 0 };
+
+  // Days first, so the "last" in "last saturday" isn't read as "the latest".
+  const day = findDayRange(t, now);
+  if (day) {
+    ref.day = { from: day.from, to: day.to, label: day.label };
+    blank(day.start, day.end);
+  }
+
+  const second = t.match(/\b(?:(?:second|2nd)\s+(?:last|latest|most\s+recent)|last\s+but\s+one|(?:the\s+)?one\s+before\s+(?:that|this|it|the\s+last(?:\s+one)?|last)|before\s+(?:that|the\s+last(?:\s+one)?))\b/);
+  if (second) {
+    ref.ordinal = 2;
+    blank(second.index!, second.index! + second[0].length);
+  } else if (/\b(last|latest|previous|recent|newest|that|this|it|undo)\b/.test(t)) {
+    ref.ordinal = 1;
+  }
+
+  const isWord = (w: string) =>
+    w && !STOP.has(w) && !REF_FILLER.test(w) && !scanner.isKnown(w) && !/^(of|so|for|from|on|at|which|who|what|was|were|i|me)$/.test(w);
+
+  if (mode === "edit") {
+    const words: string[] = [];
+    const pointers = [
+      /\b(?:from|in|to|for|on)\s+(?:the\s+|that\s+|my\s+|our\s+)?([\p{L}]+)/gu,
+      /\b(?:make|change|edit|fix|update|correct)\s+(?:the\s+|that\s+|my\s+|our\s+)?([\p{L}]+)/gu,
+      /\b([\p{L}]+)\s+(?:one|bill|expense|wala|vala|wali|vali)\b/gu,
+      /\b(?:split|divide)\s+(?:the|that|my|our)\s+([\p{L}]+)/gu,
+      // "the dinner was 2200, not 2400"
+      /\b(?:the|that|my|our)\s+([\p{L}]+)\s+(?:was|is|should\s+be|should\s+have\s+been|should've\s+been|came\s+to)\b/gu,
+    ];
+    for (const re of pointers) for (const m of t.matchAll(re)) if (isWord(m[1]) && !words.includes(m[1])) words.push(m[1]);
+    ref.keyword = words.length ? words.join(" ") : null;
+    ref.confidence = refConfidence(ref);
+    return ref;
+  }
+
+  const amount = findAmounts(t)[0];
+  if (amount) {
+    ref.amountPaise = amount.paise;
+    blank(amount.start, amount.end);
+  }
+
+  const paid =
+    t.match(/\bpaid\s+by\s+([\p{L}']+(?:\s+[\p{L}']+)?)/u) ??
+    t.match(/(?<![\p{L}])([\p{L}']+(?:\s+[\p{L}']+)?)\s+(?:had\s+|has\s+)?(?:paid|payed|covered|ne\s+(?:diya|pay\s+kiya|paid|bhara))(?![\p{L}])/u);
+  if (paid) {
+    const hit = scanner.scan(paid[1]).find((h) => h.ids.length === 1);
+    if (hit) ref.payer = hit.ids[0];
+    else if (/\b(maine|mene)\b/.test(paid[1])) ref.payer = sender;
+    if (ref.payer) blank(paid.index!, paid.index! + paid[0].length);
+  }
+  const named = scanner.scan(t.replace(/'s\b/g, "  ")).find((h) => h.ids.length === 1 && !h.all);
+  if (named) {
+    if (!ref.payer) ref.member = named.ids[0];
+    blank(named.start, named.end);
+  }
+
+  const words = t
+    .replace(/'s\b/g, " ")
+    .replace(/[^\p{L}\s']/gu, " ")
+    .split(/\s+/)
+    .filter(isWord);
+  ref.keyword = words.length ? words.join(" ") : null;
+  ref.confidence = refConfidence(ref);
+  return ref;
+}
+
+/** Which bill a message means, for parsers (like the LLM) that only return a keyword. */
+export function parseExpenseRef(raw: string, roster: Roster, mode: "delete" | "edit", now = new Date()): ExpenseRef {
+  const t = (" " + raw.replace(/@splitbot\b/gi, " ").replace(/\s+/g, " ").trim() + " ").toLowerCase();
+  return expenseRefIn(t, new Scanner(roster), roster.senderId, now, mode);
 }
 
 interface AmountHit {
@@ -573,7 +762,7 @@ function chargeLabel(type: SplitCharge["type"], label: string) {
   return { service: "Service charge", tip: "Tip", discount: "Discount", other: "Charge" }[type] ?? "Charge";
 }
 
-function categorise(t: string): Category {
+export function categorise(t: string): Category {
   for (const [cat, re] of CATEGORY_WORDS) if (re.test(t)) return cat;
   return "other";
 }

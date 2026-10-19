@@ -164,8 +164,14 @@ Rules:
 Return every field; use null / [] when not applicable.`;
 
 let client: OpenAI | null = null;
+/**
+ * TODO(llm): switched off; every message goes through the rule parser. Before turning this back
+ * on, call the model only when the rules aren't confident (not on every message, as before), and
+ * add a field for which bill an edit or delete means. Then restore:
+ *   return Boolean(process.env.OPENAI_API_KEY);
+ */
 export function llmEnabled() {
-  return Boolean(process.env.OPENAI_API_KEY);
+  return false;
 }
 
 export async function parseWithLLM(

@@ -14,9 +14,9 @@ pnpm dev              # http://localhost:3000
 
 Copy `.env.example` to `.env.local` if it isn't there already. The only required value is `DATABASE_URL`.
 
-### OpenAI (optional)
+### OpenAI (switched off)
 
-Put `OPENAI_API_KEY=sk-...` in `.env.local` and restart. Without a key, SplitBot uses its built-in rule parser (`src/lib/bot/rules.ts`). That parser handles the common phrasings already, so the app works fully without the key. With a key, messages go to `OPENAI_MODEL` (default `gpt-5-mini`) using a strict JSON schema. If the call fails it falls back to the rule parser.
+SplitBot reads messages with its built-in rule parser (`src/lib/bot/rules.ts`), which runs in the app with no API calls. An OpenAI-based parser exists in `src/lib/bot/llm.ts` but is switched off for now (see the TODO on `llmEnabled`), so `OPENAI_API_KEY` is ignored.
 
 ### Firebase: login, analytics, performance, push
 
@@ -99,6 +99,8 @@ public/sw.js             service worker (app shell + offline page; API is never 
 ```
 
 `pnpm test` runs the engine and parser tests, including the PRD's Toit dinner example (₹701.50 / ₹701.50 / ₹391 / ₹391).
+
+`pnpm test:flows` runs the bot end to end against the local Docker Postgres: adding, changing and deleting bills from natural messages, tapping the bot's buttons, confirming cards and checking balances. It creates and wipes a separate `splitbot_test` database (the suite refuses any database whose name doesn't end in `_test`), so your dev data is untouched.
 
 ## Not in V1 yet
 

@@ -9,6 +9,7 @@
     "start": "next start --hostname 0.0.0.0",
     "lint": "eslint",
     "test": "vitest run",
+    "test:flows": "TEST_DATABASE_URL=postgres://splitbot:splitbot@localhost:5440/splitbot_test vitest run src/lib/bot/flows.test.ts",
     "db:up": "docker compose up -d",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",

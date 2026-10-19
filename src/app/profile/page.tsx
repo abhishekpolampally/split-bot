@@ -18,7 +18,9 @@ export default function Profile() {
   async function logout() {
     await disablePush().catch(() => {}); // stop this device getting this account's notifications
     await api("/api/auth/logout", { body: {} });
-    window.location.assign("/login");
+    // A full page load, not router.push: it drops this account's cached data from memory, and
+    // replace() keeps Back from returning to a logged-out profile.
+    window.location.replace("/login");
   }
 
   return (

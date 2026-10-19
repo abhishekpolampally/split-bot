@@ -1,4 +1,5 @@
 import type { Category, SplitCharge, SplitRule } from "@/lib/split/types";
+import type { DayRange } from "./dates";
 
 export type Intent =
   | "create_expense"
@@ -53,6 +54,8 @@ export interface ParsedMessage {
   /** For query_spend / delete_expense: what to look for. */
   queryKeyword: string | null;
   queryMember: string | null;
+  /** For delete_expense (and edits naming a bill): which logged bill the message means. */
+  expenseRef: ExpenseRef | null;
   /** Names that couldn't be matched to a single member. */
   unresolved: { name: string; candidates: string[] }[];
   /** The parser wants to ask something before proposing. */
@@ -60,6 +63,25 @@ export interface ParsedMessage {
   /** For help / unknown. */
   replyText: string | null;
   /** 0..1, how sure the parser is about the amounts. */
+  confidence: number;
+}
+
+/**
+ * The clues a message gives about an existing bill: "the one before that", "last saturday's
+ * dinner", "the 640 cab Kabir paid". Every clue that is set must match.
+ */
+export interface ExpenseRef {
+  /** 1 = the latest match, 2 = the one before it. Null when the message doesn't say. */
+  ordinal: number | null;
+  /** Words that should appear in the description, items or category ("cab", "dinner"). */
+  keyword: string | null;
+  amountPaise: number | null;
+  /** "Kabir paid", "paid by Kabir". */
+  payer: string | null;
+  /** A name without "paid" ("Kabir's dinner"): the payer or anyone in the split. */
+  member: string | null;
+  day: DayRange | null;
+  /** 0..1, how precisely the clues pick out a bill. Too low and the bot asks instead of searching. */
   confidence: number;
 }
 
@@ -73,6 +95,10 @@ export interface Overrides {
   totalPaise?: number;
   /** delete_expense confirmation. */
   deleteExpenseId?: string;
+  /** delete_expense picked a proposal nobody has confirmed yet. */
+  cancelProposalId?: string;
+  /** edit_expense: the bill picked from a "which one?" question. */
+  editBill?: { kind: "expense" | "proposal"; id: string };
   keep?: boolean;
 }
 
@@ -97,6 +123,7 @@ export function emptyParse(intent: Intent): ParsedMessage {
     removeParticipants: [],
     queryKeyword: null,
     queryMember: null,
+    expenseRef: null,
     unresolved: [],
     clarify: null,
     replyText: null,
