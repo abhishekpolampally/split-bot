@@ -10,11 +10,12 @@ import { MessageItem, Typing } from "@/components/chat/Messages";
 import { Avatar, Header, Loading } from "@/components/ui";
 import { track } from "@/lib/firebase/analytics";
 import type { GroupInfo } from "@/lib/chatCache";
-import { applyPoll, dropChat, getChat, hydrateChat, resetChat, setChatInfo, setChatMembers, subscribeChat } from "@/lib/chatStore";
+import { applyPoll, checkUser, dropChat, getChat, hydrateChat, resetChat, setChatInfo, setChatMembers, subscribeChat } from "@/lib/chatStore";
 import { api, ApiError, dayLabel } from "@/lib/client";
 import type { MemberView, MessageView } from "@/lib/types";
 
 interface Poll {
+  userId: string;
   messages: MessageView[];
   cursor: { after: number; since: string };
   /** The catch-up was bigger than one page: start over from the latest page. */
@@ -58,6 +59,8 @@ export default function GroupChat() {
         if (cursor.since) q.set("since", cursor.since);
         if (withMembers) q.set("members", "1");
         const res = await api<Poll>(`/api/groups/${id}/messages?${q}`);
+        // Someone else's chats on this device: they're deleted and the page starts over.
+        if (!(await checkUser(res.userId))) return;
         setBotBusy(res.botBusy);
         if (res.truncated) {
           // Away too long to catch up message by message: drop the copy and load the latest page.
@@ -84,7 +87,9 @@ export default function GroupChat() {
     });
     // Shown from the cache when there is one; this refreshes it in the background.
     api<GroupInfo>(`/api/groups/${id}`).then(
-      (i) => setChatInfo(id, i),
+      async (i) => {
+        if (await checkUser(i.userId)) setChatInfo(id, i);
+      },
       (e) => {
         if (isGone(e)) dropChat(id);
         setError((e as Error).message);

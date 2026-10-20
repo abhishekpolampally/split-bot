@@ -7,8 +7,9 @@ import type { MemberView, MessageView } from "@/lib/types";
  * IndexedDB is missing or broken (private mode, quota), reads come back empty, writes are dropped
  * and the chat behaves as it did without a cache.
  *
- * The cache belongs to one user. `openCache(userId)` wipes it when someone else signs in, and
- * logout wipes it outright.
+ * The cache belongs to one user, whose id is kept with the data. Whenever the server says someone
+ * else is signed in (`openCache(userId)`), the whole database is deleted and starts over; logout
+ * deletes it too.
  */
 
 /** Bump when the shape of what's stored changes; opening with a new version wipes everything. */
@@ -22,6 +23,8 @@ export const STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 export interface GroupInfo {
   group: { id: string; name: string; color: string; inviteToken: string };
   meId: string;
+  /** The signed-in user the server answered for. */
+  userId: string;
   members: MemberView[];
 }
 export interface ChatCursor {
@@ -100,15 +103,19 @@ export function cacheOwner(): Promise<string | null> {
   return withDb(null, async (db) => (await db.get("meta", "owner"))?.value ?? null);
 }
 
-/** Claim the cache for `userId`, wiping anything another user left behind. */
-export async function openCache(userId: string): Promise<void> {
+/**
+ * Claim the cache for `userId`. If it holds someone else's chats, delete the whole database first.
+ * Returns false when it did (so anything already read from it should go too).
+ */
+export async function openCache(userId: string): Promise<boolean> {
   const owner = await cacheOwner();
-  if (owner === userId) return;
+  if (owner === userId) return true;
   // No owner means nothing was left by anyone else (clearAll removes the owner with the data).
   if (owner) await clearAll();
   await withDb(undefined, async (db) => {
     await db.put("meta", { key: "owner", value: userId });
   });
+  return !owner;
 }
 
 export async function loadGroup(groupId: string): Promise<{ record: GroupRecord; messages: MessageView[] } | null> {
@@ -203,13 +210,17 @@ export async function dropGroup(groupId: string): Promise<void> {
   });
 }
 
-/** Wipe everything, owner included (logout, or a different user). */
+/** Delete the whole database, owner included (logout, or a different user). The next call starts a fresh one. */
 export async function clearAll(): Promise<void> {
-  await withDb(undefined, async (db) => {
-    const tx = db.transaction(["meta", "groups", "messages"], "readwrite");
-    await Promise.all([tx.objectStore("meta").clear(), tx.objectStore("groups").clear(), tx.objectStore("messages").clear()]);
-    await tx.done;
-  });
+  const open = dbPromise;
+  dbPromise = null;
+  (await open)?.close();
+  if (typeof indexedDB === "undefined") return;
+  try {
+    await deleteDB(DB_NAME);
+  } catch {
+    // Nothing more to do; the owner check runs again on the next response.
+  }
 }
 
 /** Drop groups nobody has opened for STALE_AFTER_MS. Run once per app start. */

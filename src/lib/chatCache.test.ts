@@ -28,7 +28,7 @@ const msg = (id: number, body = `message ${id}`): MessageView => ({
 });
 const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => msg(from + i));
 const cursor = (after: number) => ({ after, since: "2026-10-20T00:00:00.000Z" });
-const info: GroupInfo = { group: { id: "g1", name: "Goa", color: "#0a0", inviteToken: "t" }, meId: "m1", members: [] };
+const info: GroupInfo = { group: { id: "g1", name: "Goa", color: "#0a0", inviteToken: "t" }, meId: "m1", userId: "u1", members: [] };
 const ids = async (groupId: string) => (await cache.loadGroup(groupId))?.messages.map((m) => m.id);
 
 describe("messages", () => {
@@ -118,11 +118,12 @@ describe("who the cache belongs to", () => {
     expect(await ids("g1")).toEqual([1]);
   });
 
-  it("a different user wipes it first", async () => {
-    await cache.openCache("u1");
+  it("a different user deletes the whole database first, and says so", async () => {
+    expect(await cache.openCache("u1")).toBe(true);
     await cache.saveMessages("g1", [msg(1)], cursor(1));
     await cache.saveInfo("g1", info);
-    await cache.openCache("u2");
+    expect(await cache.openCache("u1")).toBe(true);
+    expect(await cache.openCache("u2")).toBe(false);
     expect(await cache.cacheOwner()).toBe("u2");
     expect(await cache.loadGroup("g1")).toBeNull();
   });
@@ -131,6 +132,7 @@ describe("who the cache belongs to", () => {
     await cache.openCache("u1");
     await cache.saveMessages("g1", [msg(1)], cursor(1));
     await cache.clearAll();
+    expect((await indexedDB.databases()).map((d) => d.name)).not.toContain("splitbot");
     expect(await cache.cacheOwner()).toBeNull();
     expect(await cache.loadGroup("g1")).toBeNull();
   });
@@ -166,7 +168,7 @@ describe("without IndexedDB", () => {
     delete globalThis.indexedDB;
     vi.resetModules();
     const none: Cache = await import("./chatCache");
-    await expect(none.openCache("u1")).resolves.toBeUndefined();
+    await expect(none.openCache("u1")).resolves.toBe(true);
     await expect(none.saveMessages("g1", [msg(1)], cursor(1))).resolves.toBeUndefined();
     await expect(none.loadGroup("g1")).resolves.toBeNull();
     await expect(none.cacheOwner()).resolves.toBeNull();

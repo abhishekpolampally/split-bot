@@ -10,15 +10,12 @@ type Cache = typeof import("./chatCache");
 let store: Store;
 let cache: Cache;
 const reload = vi.fn();
-let signedIn = "u1";
 
 beforeEach(async () => {
   globalThis.indexedDB = new IDBFactory();
   vi.resetModules();
   reload.mockReset();
-  signedIn = "u1";
   vi.stubGlobal("window", { location: { reload } });
-  vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ user: { id: signedIn } }), { status: 200 }));
   cache = await import("./chatCache");
   store = await import("./chatStore");
 });
@@ -35,7 +32,7 @@ const msg = (id: number, body = `message ${id}`): MessageView => ({
   proposal: null,
 });
 const cursor = (after: number) => ({ after, since: "2026-10-20T00:00:00.000Z" });
-/** Let fire-and-forget writes and the background owner check finish. */
+/** Let fire-and-forget writes finish. */
 const settle = () => new Promise((r) => setTimeout(r, 20));
 
 describe("chat store", () => {
@@ -87,7 +84,7 @@ describe("chat store", () => {
 
   it("dropChat (removed from the group) forgets its info and messages", async () => {
     await store.hydrateChat("g1");
-    store.setChatInfo("g1", { group: { id: "g1", name: "Goa", color: "#0a0", inviteToken: "t" }, meId: "m1", members: [] });
+    store.setChatInfo("g1", { group: { id: "g1", name: "Goa", color: "#0a0", inviteToken: "t" }, meId: "m1", userId: "u1", members: [] });
     store.applyPoll("g1", [msg(1)], cursor(1));
     store.dropChat("g1");
     await settle();
@@ -116,19 +113,31 @@ describe("whose cache it is", () => {
     expect(await cache.loadGroup("g1")).toBeNull();
   });
 
-  it("backstop: a session for a different user than the cache's owner wipes it and reloads", async () => {
+  it("a response for a different user deletes the whole cache and starts the page over", async () => {
     await cache.openCache("u1");
     await cache.saveMessages("g1", [msg(1)], cursor(1));
-    signedIn = "u2";
     await store.hydrateChat("g1");
-    await settle();
+    expect(store.getChat("g1")!.messages.size).toBe(1);
+    expect(await store.checkUser("u2")).toBe(false);
     expect(reload).toHaveBeenCalled();
+    expect(store.getChat("g1")).toBeUndefined();
     expect(await cache.loadGroup("g1")).toBeNull();
+    expect(await cache.cacheOwner()).toBe("u2");
   });
 
-  it("an unclaimed cache is claimed for whoever is signed in", async () => {
-    await store.hydrateChat("g1");
-    await settle();
+  it("the same user keeps the cache, and later checks don't touch IndexedDB", async () => {
+    await cache.openCache("u1");
+    await cache.saveMessages("g1", [msg(1)], cursor(1));
+    expect(await store.checkUser("u1")).toBe(true);
+    const owner = vi.spyOn(cache, "cacheOwner");
+    expect(await store.checkUser("u1")).toBe(true);
+    expect(owner).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+    expect(await cache.loadGroup("g1")).not.toBeNull();
+  });
+
+  it("an unclaimed cache is claimed for whoever the server says is signed in", async () => {
+    expect(await store.checkUser("u1")).toBe(true);
     expect(await cache.cacheOwner()).toBe("u1");
     expect(reload).not.toHaveBeenCalled();
   });

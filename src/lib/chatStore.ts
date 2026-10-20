@@ -1,6 +1,5 @@
 import * as cache from "@/lib/chatCache";
 import type { ChatCursor, GroupInfo } from "@/lib/chatCache";
-import { api } from "@/lib/client";
 import type { MemberView, MessageView } from "@/lib/types";
 
 /**
@@ -37,33 +36,35 @@ export function subscribeChat(groupId: string, fn: () => void) {
 
 export const getChat = (groupId: string): ChatState | undefined => chats.get(groupId);
 
-// Once per app start: check the saved cache belongs to whoever is signed in, and tidy it.
-// Login claims the cache (claimChatCache), so this normally finds nothing to do and never holds
-// up the first render; it's a backstop for sign-ins that somehow skipped that step.
-let checked: Promise<void> | null = null;
-function checkOwner() {
-  checked ??= (async () => {
-    const owner = await cache.cacheOwner();
-    const me = api<{ user: { id: string } }>("/api/me").then((r) => r.user.id);
-    void me.then(
-      async (id) => {
-        if (!owner) return cache.openCache(id);
-        if (id === owner) return;
-        await cache.clearAll();
-        // Someone else's chats may be on screen: start this page over without them.
-        window.location.reload();
-      },
-      () => {},
-    );
-    void cache.evictStale();
-  })().catch(() => {});
-  return checked;
+// Tidy old groups once per app start.
+let tidied = false;
+
+// The user the cache was last confirmed for, so each poll's check is a string compare.
+let confirmedUser: string | null = null;
+
+/**
+ * Every group-info and poll response says who is signed in. The first time (and if it ever
+ * changes), make sure the cache is theirs: if it holds someone else's chats, the whole database is
+ * deleted and the page starts over. Returns false then, and the response shouldn't be used.
+ */
+export async function checkUser(userId: string): Promise<boolean> {
+  if (userId === confirmedUser) return true;
+  const kept = await cache.openCache(userId);
+  confirmedUser = userId;
+  if (kept) return true;
+  chats.clear();
+  // Someone else's chats may be on screen: start this page over without them.
+  window.location.reload();
+  return false;
 }
 
 /** Load the saved copy of a group into memory (once per app start), then polling can begin. */
 export async function hydrateChat(groupId: string) {
   if (chats.get(groupId)?.hydrated) return;
-  await checkOwner();
+  if (!tidied) {
+    tidied = true;
+    void cache.evictStale();
+  }
   const saved = await cache.loadGroup(groupId);
   const current = chats.get(groupId);
   update(groupId, {
@@ -113,14 +114,16 @@ export function dropChat(groupId: string) {
   void cache.dropGroup(groupId);
 }
 
-/** After sign-in: the cache now belongs to `userId` (anyone else's is wiped). */
+/** After sign-in: the cache now belongs to `userId` (anyone else's is deleted). */
 export async function claimChatCache(userId: string) {
   chats.clear();
   await cache.openCache(userId);
+  confirmedUser = userId;
 }
 
 /** Logout: nothing of this account stays on the device. */
 export async function clearChatCache() {
   chats.clear();
+  confirmedUser = null;
   await cache.clearAll();
 }

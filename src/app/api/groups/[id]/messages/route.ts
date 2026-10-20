@@ -12,7 +12,7 @@ type Ctx = { params: Promise<{ id: string }> };
 
 export const GET = route<Ctx>(async (req, ctx) => {
   const { id } = await ctx.params;
-  const { group, me } = await requireMember(id);
+  const { user, group, me } = await requireMember(id);
   const url = new URL(req.url);
   const after = Number(url.searchParams.get("after") ?? 0) || 0;
   const sinceRaw = url.searchParams.get("since");
@@ -32,6 +32,8 @@ export const GET = route<Ctx>(async (req, ctx) => {
   ]);
 
   return json({
+    // Who's asking: the device cache checks it against whose chats it holds.
+    userId: user.id,
     messages,
     truncated,
     hasMore,

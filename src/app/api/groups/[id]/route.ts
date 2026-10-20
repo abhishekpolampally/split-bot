@@ -14,6 +14,8 @@ export const GET = route<Ctx>(async (_req, ctx) => {
   return json({
     group: { id: group.id, name: group.name, color: group.color, inviteToken: group.inviteToken },
     meId: me.id,
+    // Who's asking: the device cache checks it against whose chats it holds.
+    userId: user.id,
     isOwner: isOwner(group, user),
     members: await memberViews(group.id),
   });
