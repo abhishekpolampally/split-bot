@@ -7,6 +7,7 @@ import type * as Db from "@/db";
 import type * as Orchestrator from "./orchestrator";
 import type * as Proposals from "@/lib/server/proposals";
 import type * as Ledger from "@/lib/server/ledger";
+import type * as Messages from "@/lib/server/messages";
 import { findDayRange, istDayStart } from "./dates";
 
 vi.mock("server-only", () => ({}));
@@ -25,6 +26,7 @@ let schema: typeof Db.schema;
 let bot: typeof Orchestrator;
 let proposals: typeof Proposals;
 let ledger: typeof Ledger;
+let messages: typeof Messages;
 
 async function prepareDatabase(url: string) {
   const name = new URL(url).pathname.slice(1);
@@ -56,6 +58,7 @@ beforeAll(async () => {
   bot = await import("./orchestrator");
   proposals = await import("@/lib/server/proposals");
   ledger = await import("@/lib/server/ledger");
+  messages = await import("@/lib/server/messages");
 }, 60_000);
 
 afterAll(async () => {
@@ -413,5 +416,46 @@ describe.skipIf(!TEST_URL)("deleting a bill", () => {
     expect((await g.say("how much did we spend on food")).body).toMatch(/spent ₹3,320 on food across 2 expenses/);
     await g.tap(await g.say("delete the dinner"), "Yes, delete it");
     expect((await g.say("how much did we spend on food")).body).toMatch(/spent ₹920 on food across 1 expense\./);
+  });
+});
+
+describe.skipIf(!TEST_URL)("catching up on chat (for the device cache)", () => {
+  async function chatOf(n: number) {
+    const g = await newGroup();
+    const rows = await db
+      .insert(schema.messages)
+      .values(Array.from({ length: n }, (_, i) => ({ groupId: g.group.id, senderMemberId: g.arjun.id, kind: "text" as const, body: `hi ${i}` })))
+      .returning();
+    return { g, ids: rows.map((r) => r.id).sort((a, b) => a - b) };
+  }
+
+  it("a first load returns the latest page and says there's older history", async () => {
+    const { g, ids } = await chatOf(7);
+    const page = await messages.fetchMessages(g.group.id, 0, null, 5);
+    expect(page.messages.map((m) => m.id)).toEqual(ids.slice(2));
+    expect(page).toMatchObject({ hasMore: true, truncated: false });
+    expect((await messages.fetchMessages(g.group.id, 0, null, 10)).hasMore).toBe(false);
+  });
+
+  it("a catch-up that fits in a page is the delta", async () => {
+    const { g, ids } = await chatOf(7);
+    const delta = await messages.fetchMessages(g.group.id, ids[3], new Date(), 5);
+    expect(delta.messages.map((m) => m.id)).toEqual(ids.slice(4));
+    expect(delta).toMatchObject({ truncated: false, hasMore: undefined });
+  });
+
+  it("a catch-up bigger than a page says so, so the device starts over instead", async () => {
+    const { g, ids } = await chatOf(7);
+    const delta = await messages.fetchMessages(g.group.id, ids[0], new Date(), 5);
+    expect(delta.truncated).toBe(true);
+    expect(delta.messages).toHaveLength(5);
+  });
+
+  it("an old card that changed comes back through `since`", async () => {
+    const { g, ids } = await chatOf(3);
+    const since = new Date(Date.now() + 1000);
+    await db.update(schema.messages).set({ updatedAt: new Date(Date.now() + 2000) }).where(eq(schema.messages.id, ids[0]));
+    const delta = await messages.fetchMessages(g.group.id, ids[2], since, 5);
+    expect(delta.messages.map((m) => m.id)).toEqual([ids[0]]);
   });
 });
