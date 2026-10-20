@@ -4,6 +4,7 @@ import type { ConfirmationResult, RecaptchaVerifier } from "firebase/auth";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { BotAvatar, Button, ErrorNote, Field, inputCls } from "@/components/ui";
+import { claimChatCache } from "@/lib/chatStore";
 import { api } from "@/lib/client";
 import { track } from "@/lib/firebase/analytics";
 import { firebaseApp, firebaseConfigured, missingFirebaseConfig } from "@/lib/firebase/client";
@@ -91,7 +92,9 @@ function LoginInner() {
       const { getAuth, signOut } = await import("firebase/auth");
       await signOut(getAuth(firebaseApp())).catch(() => {});
       track("login", { method: "phone", new_user: res.isNew });
-      const { user } = await api<{ user: { name: string | null } }>("/api/me");
+      const { user } = await api<{ user: { id: string; name: string | null } }>("/api/me");
+      // Chats saved on this device by another account are wiped before anything can show them.
+      await claimChatCache(user.id);
       if (!user.name) setStep("profile");
       else router.replace(next);
     });

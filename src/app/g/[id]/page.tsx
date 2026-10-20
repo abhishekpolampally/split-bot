@@ -2,61 +2,74 @@
 
 import { useParams, useRouter } from "next/navigation";
 import { Scale } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ChatContext, type ChatCtx } from "@/components/chat/context";
 import { Composer, type ComposerHandle } from "@/components/chat/Composer";
 import { ExpenseSheet } from "@/components/chat/ExpenseSheet";
 import { MessageItem, Typing } from "@/components/chat/Messages";
 import { Avatar, Header, Loading } from "@/components/ui";
 import { track } from "@/lib/firebase/analytics";
-import { api, dayLabel } from "@/lib/client";
+import type { GroupInfo } from "@/lib/chatCache";
+import { applyPoll, dropChat, getChat, hydrateChat, resetChat, setChatInfo, setChatMembers, subscribeChat } from "@/lib/chatStore";
+import { api, ApiError, dayLabel } from "@/lib/client";
 import type { MemberView, MessageView } from "@/lib/types";
 
-interface GroupInfo {
-  group: { id: string; name: string; color: string; inviteToken: string };
-  meId: string;
-  members: MemberView[];
-}
 interface Poll {
   messages: MessageView[];
   cursor: { after: number; since: string };
+  /** The catch-up was bigger than one page: start over from the latest page. */
+  truncated?: boolean;
+  hasMore?: boolean;
   botBusy: string | null;
   members?: MemberView[];
 }
 
+const NO_MESSAGES = new Map<number, MessageView>();
+// Removed from the group, or the group is gone: its saved copy goes too.
+const isGone = (e: unknown) => e instanceof ApiError && (e.status === 403 || e.status === 404);
+
 export default function GroupChat() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const [info, setInfo] = useState<GroupInfo | null>(null);
+  // Messages, info and the poll cursor live in chatStore (memory, backed by IndexedDB), so a chat
+  // opened before shows at once and polling picks up where it left off.
+  const subscribe = useCallback((fn: () => void) => subscribeChat(id, fn), [id]);
+  const chat = useSyncExternalStore(subscribe, () => getChat(id), () => undefined);
+  const info = chat?.info ?? null;
+  const msgs = chat?.messages ?? NO_MESSAGES;
   const [error, setError] = useState<string | null>(null);
-  const [msgs, setMsgs] = useState<Map<number, MessageView>>(new Map());
+  // Never cached: a stale "Thinking…" would hang around, so it always comes from a poll.
   const [botBusy, setBotBusy] = useState<string | null>(null);
   const [sheet, setSheet] = useState<{ open: boolean; proposalId?: string }>({ open: false });
-  const cursor = useRef({ after: 0, since: "" });
   const polling = useRef(false);
   const tick = useRef(0);
   const composer = useRef<ComposerHandle>(null);
 
   const poll = useCallback(async () => {
-    if (polling.current) return;
+    // Until the saved copy is read, a poll would start from scratch and load everything again.
+    if (polling.current || !getChat(id)?.hydrated) return;
     polling.current = true;
     try {
-      const withMembers = tick.current++ % 10 === 0;
-      const q = new URLSearchParams({ after: String(cursor.current.after) });
-      if (cursor.current.since) q.set("since", cursor.current.since);
-      if (withMembers) q.set("members", "1");
-      const res = await api<Poll>(`/api/groups/${id}/messages?${q}`);
-      cursor.current = res.cursor;
-      setBotBusy(res.botBusy);
-      if (res.members) setInfo((i) => (i ? { ...i, members: res.members! } : i));
-      if (res.messages.length) {
-        setMsgs((prev) => {
-          const next = new Map(prev);
-          for (const m of res.messages) next.set(m.id, m);
-          return next;
-        });
+      // A second round only when the first says the copy is too far behind (`truncated`).
+      for (let round = 0; round < 2; round++) {
+        const { cursor } = getChat(id)!;
+        const withMembers = tick.current++ % 10 === 0;
+        const q = new URLSearchParams({ after: String(cursor.after) });
+        if (cursor.since) q.set("since", cursor.since);
+        if (withMembers) q.set("members", "1");
+        const res = await api<Poll>(`/api/groups/${id}/messages?${q}`);
+        setBotBusy(res.botBusy);
+        if (res.truncated) {
+          // Away too long to catch up message by message: drop the copy and load the latest page.
+          await resetChat(id);
+          continue;
+        }
+        applyPoll(id, res.messages, res.cursor, res.hasMore);
+        if (res.members) setChatMembers(id, res.members);
+        break;
       }
     } catch (e) {
+      if (isGone(e)) dropChat(id);
       setError((e as Error).message);
     } finally {
       polling.current = false;
@@ -64,8 +77,22 @@ export default function GroupChat() {
   }, [id]);
 
   useEffect(() => {
-    api<GroupInfo>(`/api/groups/${id}`).then(setInfo, (e) => setError((e as Error).message));
-    void poll();
+    let live = true;
+    tick.current = 0; // the first poll also refreshes the member list
+    void hydrateChat(id).then(() => {
+      if (live) void poll();
+    });
+    // Shown from the cache when there is one; this refreshes it in the background.
+    api<GroupInfo>(`/api/groups/${id}`).then(
+      (i) => setChatInfo(id, i),
+      (e) => {
+        if (isGone(e)) dropChat(id);
+        setError((e as Error).message);
+      },
+    );
+    return () => {
+      live = false;
+    };
   }, [id, poll]);
 
   // Poll faster while the bot is working.

@@ -77,12 +77,16 @@ export async function fetchMessages(groupId: string, after: number, since: Date 
     : and(eq(schema.messages.groupId, groupId), gt(schema.messages.id, after));
 
   let rows = await db.select().from(schema.messages).where(where).orderBy(asc(schema.messages.id)).limit(limit + 1);
+  const overflow = rows.length > limit;
   // First load: only the most recent `limit` messages.
-  if (after === 0 && rows.length > limit) {
+  if (after === 0 && overflow) {
     rows = (
       await db.select().from(schema.messages).where(eq(schema.messages.groupId, groupId)).orderBy(desc(schema.messages.id)).limit(limit)
     ).reverse();
   }
+  // A catch-up bigger than one page: the client's copy is too far behind to patch, so it should
+  // drop it and load the latest page instead (`truncated`).
+  if (after > 0 && overflow) rows = rows.slice(0, limit);
 
   const proposalIds = [...new Set(rows.map((r) => r.proposalId).filter(Boolean))] as string[];
   const proposals = proposalIds.length
@@ -116,5 +120,11 @@ export async function fetchMessages(groupId: string, after: number, since: Date 
     };
   });
   const maxUpdated = rows.reduce<Date | null>((m, r) => (!m || r.updatedAt > m ? r.updatedAt : m), since);
-  return { messages: views, maxUpdated };
+  return {
+    messages: views,
+    maxUpdated,
+    truncated: after > 0 && overflow,
+    // First load only: whether there's history older than this page.
+    hasMore: after === 0 ? overflow : undefined,
+  };
 }
