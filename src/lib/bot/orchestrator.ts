@@ -504,6 +504,30 @@ function askAboutBills(input: MentionInput, body: string, options: ClarifyOption
   });
 }
 
+/**
+ * "Delete the last two": never several at once, since a misread would wipe bills nobody meant.
+ * Show the bills it would have been, one button each, so each delete is its own tap.
+ */
+async function deleteSeveral(input: MentionInput, ref: ExpenseRef, roster: Roster) {
+  const { group } = input;
+  const bills = matchBills(await loadBills(group.id, ref), ref).slice(0, Math.min(ref.count ?? 2, 5));
+  const which = narrows(ref) ? ` ${describeRef(ref, roster.members)}` : "";
+  if (!bills.length) {
+    return botSay(group.id, narrows(ref) ? `I couldn't find${which}.` : "There's nothing to delete yet.");
+  }
+  const found =
+    bills.length < (ref.count ?? 2)
+      ? `I only found ${bills.length === 1 ? "this one" : `these ${bills.length}`}${which}`
+      : `Here are the last ${bills.length}${which}`;
+  return askAboutBills(
+    input,
+    `I delete one bill at a time, so nothing gets wiped by accident. ${found}. Tap the one to delete, then ask again for the next.`,
+    bills.map(deleteOption),
+    "Keep everything",
+    {},
+  );
+}
+
 async function deleteFlow(input: MentionInput, parsed: ParsedMessage, roster: Roster) {
   const { group, sender } = input;
   // The LLM only returns a keyword, so read the other clues from the text ourselves.
@@ -511,6 +535,7 @@ async function deleteFlow(input: MentionInput, parsed: ParsedMessage, roster: Ro
     return botSay(group.id, "I can only delete one bill at a time, so nothing gets wiped by accident. Which one? e.g. “@splitbot delete yesterday's cab”.");
   }
   const ref = parsed.expenseRef ?? { ...parseExpenseRef(input.text, roster, "delete"), keyword: parsed.queryKeyword ?? null };
+  if (ref.count) return deleteSeveral(input, ref, roster);
   const found = await resolveBill(group.id, ref);
 
   if (found.kind === "vague") return botSay(group.id, VAGUE_DELETE);
