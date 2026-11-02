@@ -11,11 +11,13 @@ import type { Roster } from "./types";
  *
  * The rule for amounts: a named amount is that person's whole share, and whatever is left of the
  * total is split equally among everyone else in the group, unless the message leaves someone out
- * or says who gets the rest. No total means the amounts are the bill. The bot asks only when the
- * numbers can't work (the named amounts are more than the total).
+ * or says who gets the rest. No total means the amounts are the bill. Naming an item on a bill
+ * with a total ("Aman's drinks were 400", "Aman had the beer for 540") is an extra on top of an
+ * equal share; "only had" makes it the whole share. The bot asks only when the numbers can't work
+ * (the named amounts are more than the total).
  *
- * Cases the parser gets wrong today carry `gap` and run as `it.fails`, so the suite stays green
- * and lists what's missing. When a fix makes one pass, `it.fails` turns red: drop its `gap`.
+ * A case the parser can't handle yet can carry `gap` and run as `it.fails`, so the suite stays
+ * green and lists what's missing. When a fix makes it pass, `it.fails` turns red: drop its `gap`.
  */
 
 const roster: Roster = {
@@ -67,23 +69,20 @@ describe("each person's own amount", () => {
       {
         text: "where I had 390 + 440, Aman took something for 350 and rohan took something for 250",
         shares: MINE_830,
-        gap: "“390 + 440” becomes two items, “took something for 350” isn't an amount for Aman, and unowned items are split across everyone",
       },
-      { text: "total is 1430. I had 390 + 440, Aman 350, Rohan 250", shares: MINE_830, gap: "“I had 390 + 440” isn't read as Arjun's 830" },
-      { text: "dinner 1430, me 830, aman 350, rohan 250", shares: MINE_830, gap: "“me 830” becomes an item split by everyone, on top of the 1430" },
-      { text: "dinner 1430: aman 350, rohan 250, rest me", shares: MINE_830, gap: "“rest me” loses Aman's 350 and shrinks the total to 350" },
-      { text: "I paid 1430, Aman's share is 350, Rohan's is 250, the rest is mine", shares: MINE_830, gap: "“Aman's share is 350” becomes an item called “'s”; the bill adds up to 2030" },
-      { text: "1430 for dinner. aman had 350, rohan had 250 and I had the rest", shares: MINE_830, gap: "“I had the rest” isn't understood" },
+      { text: "total is 1430. I had 390 + 440, Aman 350, Rohan 250", shares: MINE_830 },
+      { text: "dinner 1430, me 830, aman 350, rohan 250", shares: MINE_830 },
+      { text: "dinner 1430: aman 350, rohan 250, rest me", shares: MINE_830 },
+      { text: "I paid 1430, Aman's share is 350, Rohan's is 250, the rest is mine", shares: MINE_830 },
+      { text: "1430 for dinner. aman had 350, rohan had 250 and I had the rest", shares: MINE_830 },
       {
         text: "Aman owes me 350 and Rohan owes me 250 from the 1430 dinner",
         shares: { Aman: 350, Rohan: 250, Arjun: 415, Neha: 415 },
-        gap: "“owes me” amounts aren't read as shares; the bill adds up to 2030",
       },
-      { text: "groceries: aman 120+80, rohan 250+100, me 50", shares: { Aman: 200, Rohan: 350, Arjun: 50 }, gap: "sums per person (“120+80”) aren't added up" },
+      { text: "groceries: aman 120+80, rohan 250+100, me 50", shares: { Aman: 200, Rohan: 350, Arjun: 50 } },
       {
         text: "lunch 900, Aman ordered 300 worth and Rohan 200, rest split equally between me and Neha",
         shares: { Aman: 300, Rohan: 200, Arjun: 200, Neha: 200 },
-        gap: "“rest split equally between me and Neha” after personal amounts",
       },
     ],
     expectSplit,
@@ -97,12 +96,11 @@ describe("the rest is split equally among everyone not named", () => {
       { text: "dinner 1430, aman 350, rohan 450", shares: { Aman: 350, Rohan: 450, Arjun: 315, Neha: 315 } },
       { text: "cab 900, Aman 300", shares: { Aman: 300, Arjun: 200, Rohan: 200, Neha: 200 } },
       { text: "dinner 600, aman 350, rohan 250", shares: { Aman: 350, Rohan: 250 } },
-      { text: "Aman took something for 350 and rohan took something for 250", shares: { Aman: 350, Rohan: 250 }, gap: "“took something for 350” isn't an amount for Aman; splits ₹600 across all four" },
+      { text: "Aman took something for 350 and rohan took something for 250", shares: { Aman: 350, Rohan: 250 } },
       { text: "dinner 1430, aman 350, rohan 450, neha didn't come", shares: { Aman: 350, Rohan: 450, Arjun: 630 } },
       {
         text: "dinner 1430 except Neha, aman 350",
         shares: { Aman: 350, Arjun: 540, Rohan: 540 },
-        gap: "“except Neha, aman 350” is read as leaving Neha and Aman out of an item called “dinner”",
       },
       { text: "dinner 1430 between me, Aman and Rohan, aman 350", shares: { Aman: 350, Arjun: 540, Rohan: 540 } },
     ],
@@ -116,14 +114,28 @@ describe("a shared part plus personal extras", () => {
       {
         text: "dinner 2200 with Aman and Rohan, Aman's drinks were 400 and Rohan's 300, rest split equally",
         shares: { Arjun: 500, Aman: 900, Rohan: 800 },
-        gap: "personal extras on top of an equal split of the rest",
       },
       {
         text: "bill 1600. Neha only had a coffee for 100, split the rest between me, Aman and Rohan",
         shares: { Neha: 100, Arjun: 500, Aman: 500, Rohan: 500 },
-        gap: "one person's fixed amount, the rest split among the others",
       },
-      { text: "snacks 390 + 210 + 300 between me, Aman and Rohan", shares: { Arjun: 300, Aman: 300, Rohan: 300 }, gap: "a sum as the total (“390 + 210 + 300”)" },
+      { text: "snacks 390 + 210 + 300 between me, Aman and Rohan", shares: { Arjun: 300, Aman: 300, Rohan: 300 } },
+      { text: "dinner 2000, aman had the beer for 540", shares: { Aman: 905, Arjun: 365, Rohan: 365, Neha: 365 } },
+      { text: "aman had 2 beers for 400, dinner 2000", shares: { Aman: 900, Arjun: 500, Rohan: 500, Neha: 500 } },
+    ],
+    expectSplit,
+  );
+});
+
+describe("everyday phrasings around these stay right", () => {
+  run<Split>(
+    [
+      { text: "i got 2 pizzas for 600", shares: { Arjun: 150, Aman: 150, Rohan: 150, Neha: 150 } },
+      { text: "aman and i had coffee for 360", shares: { Arjun: 180, Aman: 180 } },
+      { text: "aman had the beer for 540", shares: { Aman: 540 } },
+      { text: "hotel 6000: me 3000, aman 1500, rohan 1500", shares: { Arjun: 3000, Aman: 1500, Rohan: 1500 } },
+      { text: "rs. 500 for dinner", shares: { Arjun: 125, Aman: 125, Rohan: 125, Neha: 125 } },
+      { text: "drinks 2000, Aman +200", shares: { Arjun: 450, Aman: 650, Rohan: 450, Neha: 450 } },
     ],
     expectSplit,
   );
@@ -131,7 +143,7 @@ describe("a shared part plus personal extras", () => {
 
 describe("someone else paid", () => {
   run<Split>(
-    [{ text: "Aman paid 1430. I had 830, Rohan 250, Aman 350", payer: "Aman", shares: MINE_830, gap: "“I had 830” with another payer" }],
+    [{ text: "Aman paid 1430. I had 830, Rohan 250, Aman 350", payer: "Aman", shares: MINE_830 }],
     expectSplit,
   );
 });
@@ -144,7 +156,6 @@ describe("asks instead of guessing", () => {
         text: "total 1000, I had 390 + 440, Aman 350, Rohan 250",
         why: "the amounts add up to ₹1,430, not ₹1,000",
         mentions: "₹1,430",
-        gap: "asks, but says the amounts come to ₹830: Aman's and Rohan's are lost",
       },
     ],
     expectAsk,

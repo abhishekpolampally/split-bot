@@ -181,6 +181,18 @@ export function buildSpec(
         },
       };
     }
+    // "total 1000, me 830, Aman 350, Rohan 250": the named amounts can't fit in the total.
+    const named = Object.values(spec.exact ?? {}).reduce((s, v) => s + v, 0);
+    if (rule === "exact" && total && named > total && !forceDefaults) {
+      return {
+        kind: "question",
+        question: {
+          text: `The amounts you named add up to ${formatINR(named)}, more than the ${formatINR(total)} total. Is the total ${formatINR(named)}?`,
+          options: [{ label: `Yes, ${formatINR(named)}`, patch: { totalPaise: named } }],
+          hint: 'Or send it again with the right numbers, e.g. "@splitbot dinner 1430, Aman 350, Rohan 250".',
+        },
+      };
+    }
     return { kind: "reply", text: `${result.errors.join(" ")} Could you rephrase it?` };
   }
 

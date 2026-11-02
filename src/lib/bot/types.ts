@@ -64,6 +64,8 @@ export interface ParsedMessage {
   replyText: string | null;
   /** 0..1, how sure the parser is about the amounts. */
   confidence: number;
+  /** No total was said, so totalPaise is just the named amounts added up. */
+  totalIsSum?: boolean;
 }
 
 /**
