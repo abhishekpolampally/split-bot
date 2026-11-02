@@ -9,6 +9,11 @@ import type { Roster } from "./types";
  * should happen: the exact shares, or that the bot asks instead of guessing. A wrong split that
  * looks confident is the worst outcome, because people confirm it without reading.
  *
+ * The rule for amounts: a named amount is that person's whole share, and whatever is left of the
+ * total is split equally among everyone else in the group, unless the message leaves someone out
+ * or says who gets the rest. No total means the amounts are the bill. The bot asks only when the
+ * numbers can't work (the named amounts are more than the total).
+ *
  * Cases the parser gets wrong today carry `gap` and run as `it.fails`, so the suite stays green
  * and lists what's missing. When a fix makes one pass, `it.fails` turns red: drop its `gap`.
  */
@@ -69,13 +74,37 @@ describe("each person's own amount", () => {
       { text: "dinner 1430: aman 350, rohan 250, rest me", shares: MINE_830, gap: "“rest me” loses Aman's 350 and shrinks the total to 350" },
       { text: "I paid 1430, Aman's share is 350, Rohan's is 250, the rest is mine", shares: MINE_830, gap: "“Aman's share is 350” becomes an item called “'s”; the bill adds up to 2030" },
       { text: "1430 for dinner. aman had 350, rohan had 250 and I had the rest", shares: MINE_830, gap: "“I had the rest” isn't understood" },
-      { text: "Aman owes me 350 and Rohan owes me 250 from the 1430 dinner", shares: MINE_830, gap: "“owes me” amounts with a total: the remainder should be the payer's" },
+      {
+        text: "Aman owes me 350 and Rohan owes me 250 from the 1430 dinner",
+        shares: { Aman: 350, Rohan: 250, Arjun: 415, Neha: 415 },
+        gap: "“owes me” amounts aren't read as shares; the bill adds up to 2030",
+      },
       { text: "groceries: aman 120+80, rohan 250+100, me 50", shares: { Aman: 200, Rohan: 350, Arjun: 50 }, gap: "sums per person (“120+80”) aren't added up" },
       {
         text: "lunch 900, Aman ordered 300 worth and Rohan 200, rest split equally between me and Neha",
         shares: { Aman: 300, Rohan: 200, Arjun: 200, Neha: 200 },
         gap: "“rest split equally between me and Neha” after personal amounts",
       },
+    ],
+    expectSplit,
+  );
+});
+
+describe("the rest is split equally among everyone not named", () => {
+  run<Split>(
+    [
+      { text: "dinner 1430, aman 350, rohan 250", shares: { Aman: 350, Rohan: 250, Arjun: 415, Neha: 415 } },
+      { text: "dinner 1430, aman 350, rohan 450", shares: { Aman: 350, Rohan: 450, Arjun: 315, Neha: 315 } },
+      { text: "cab 900, Aman 300", shares: { Aman: 300, Arjun: 200, Rohan: 200, Neha: 200 } },
+      { text: "dinner 600, aman 350, rohan 250", shares: { Aman: 350, Rohan: 250 } },
+      { text: "Aman took something for 350 and rohan took something for 250", shares: { Aman: 350, Rohan: 250 }, gap: "“took something for 350” isn't an amount for Aman; splits ₹600 across all four" },
+      { text: "dinner 1430, aman 350, rohan 450, neha didn't come", shares: { Aman: 350, Rohan: 450, Arjun: 630 } },
+      {
+        text: "dinner 1430 except Neha, aman 350",
+        shares: { Aman: 350, Arjun: 540, Rohan: 540 },
+        gap: "“except Neha, aman 350” is read as leaving Neha and Aman out of an item called “dinner”",
+      },
+      { text: "dinner 1430 between me, Aman and Rohan, aman 350", shares: { Aman: 350, Arjun: 540, Rohan: 540 } },
     ],
     expectSplit,
   );
@@ -110,14 +139,13 @@ describe("someone else paid", () => {
 describe("asks instead of guessing", () => {
   run<Ask>(
     [
-      { text: "dinner 1430, aman 350, rohan 250", why: "who covers the other ₹830: Arjun, or everyone equally?", gap: "splits the rest equally without saying so" },
+      { text: "dinner 500, aman 350, rohan 250", why: "the named amounts (₹600) are more than the total", mentions: "₹600" },
       {
         text: "total 1000, I had 390 + 440, Aman 350, Rohan 250",
         why: "the amounts add up to ₹1,430, not ₹1,000",
         mentions: "₹1,430",
         gap: "asks, but says the amounts come to ₹830: Aman's and Rohan's are lost",
       },
-      { text: "Aman took something for 350 and rohan took something for 250", why: "no total, and nothing about Arjun's own share", gap: "splits ₹600 across all four" },
     ],
     expectAsk,
   );
