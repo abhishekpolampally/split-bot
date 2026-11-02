@@ -20,6 +20,7 @@ const STOP = new Set([
   "have", "has", "got", "share", "shares", "per", "person", "head", "please", "pls", "plz", "bill",
   "divide", "divided", "among", "add", "log", "karo", "kar", "do", "de", "dena", "baki", "baaki", "barabar",
   "ne", "ka", "ki", "ke", "hai", "tha", "mein", "me", "ko", "just", "also", "too", "total", "hisaab", "liye", "liya",
+  "where", "so", "basically", "guys", "hey",
 ]);
 // Words after "for" / "with" that aren't people, so "cab 500 for office" doesn't ask who Office is.
 const NOT_PEOPLE =
@@ -31,8 +32,15 @@ const DRINK_WORDS = [
 ];
 // Labels that describe a whole bill rather than one item on it.
 const WHOLE_BILL = /^(dinner|lunch|breakfast|brunch|meal|food|party|outing|trip|order|restaurant|cafe|bar|pub|night out)\b/;
-// Segment separators: commas (but not thousands separators like "2,400"), semicolons, newlines, "then".
-const SEGMENT_SPLIT = /(?<!\d),|,(?!\d{2})|[;\n]|\bthen\b|\bplus\b/;
+// Segment separators: commas (but not thousands separators like "2,400"), semicolons, newlines,
+// "then", and full stops between sentences (not the one in "rs. 500").
+const SEGMENT_SPLIT = /(?<!\d),|,(?!\d{2})|[;\n]|\bthen\b|\bplus\b|(?<!\brs)\.(?=\s)/;
+// An amount as typed: "350", "₹1,430", "rs 2.5k".
+const AMOUNT_RE = String.raw`(?:₹\s?|rs\.?\s?)?(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d{1,2})?k?`;
+// What may follow a person's amount: "aman had 350, …", "… 300 worth and …", but not "2 pizzas".
+const AMOUNT_END = String.raw`(?=\s*(?:[,.;!?)&]|$|(?:and|then|plus|rupees|rs|only|each|bucks|for|from|on|in|worth|so|but)\b))`;
+// "Aman's share is 350" names a whole share; "Aman's drinks were 400" names an extra.
+const SHARE_WORDS = /^(share|part|portion|amount|bill|total|cut|contribution)$/;
 
 const CATEGORY_WORDS: [Category, RegExp][] = [
   ["food", /\b(dinner|lunch|breakfast|brunch|food|pizza|biryani|swiggy|zomato|snacks?|coffee|chai|cafe|restaurant|meal|dessert|cake|paneer|chicken|naan|dal|momos?|khana|nashta)\b/],
@@ -114,7 +122,7 @@ class Scanner {
 export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, forceIntent?: Intent, now = new Date()): ParsedMessage {
   const scanner = new Scanner(roster, ov.nameMap);
   // Work on a lowercase copy; "blank" spans we've consumed so later passes skip them.
-  let t = (" " + raw.replace(/@splitbot\b/gi, " ").replace(/\s+/g, " ").trim() + " ").toLowerCase();
+  let t = addUpSums((" " + raw.replace(/@splitbot\b/gi, " ").replace(/[’‘]/g, "'").replace(/\s+/g, " ").trim() + " ").toLowerCase());
   const blank = (start: number, end: number) => {
     t = t.slice(0, start) + " ".repeat(end - start) + t.slice(end);
   };
@@ -250,6 +258,22 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
     return out;
   }
 
+  // ---- create: who had what ----------------------------------------------------
+  // "groceries: aman 200" → "groceries, aman 200"; "aman: 200" → "aman 200".
+  t = t.replace(/([\p{L}\d']+)\s*:\s+/gu, (_, w: string) => (scanner.isKnown(w) || /^(total|bill|amount)$/.test(w) ? `${w} ` : `${w}, `));
+  // "I had the rest", "the rest is mine": what's left of the total is the sender's.
+  const restMine =
+    /\b(?:the\s+)?rest\s+(?:is\s+)?(?:(?:on|by|paid\s+by|from|for)\s+)?(?:me|i|myself|mine)\b|\bi(?:'ll|\s+will)?\s+(?:had|have|took|take|pay|paid|cover|covered)\s+(?:for\s+)?the\s+rest\b/;
+  const restM = t.match(restMine);
+  if (restM) {
+    out.remainder = "payer";
+    blank(restM.index!, restM.index! + restM[0].length);
+  }
+  const own = personAmounts(t, scanner);
+  t = own.text;
+  // "I got 2 pizzas for 600": the sender is the buyer here, not the only person in the split.
+  t = t.replace(/(?<![\p{L}])(?:i|maine)\s+(?:got|bought|ordered|picked\s+up)(?![\p{L}])/gu, (s) => " ".repeat(s.length));
+
   // ---- create: percentages ---------------------------------------------------
   const pctOrder: number[] = [];
   const ratio = t.match(/(?<![\d.])(\d{1,3})\s*[-/:]\s*(\d{1,3})(?:\s*[-/:]\s*(\d{1,3}))?(?![\d%])/);
@@ -305,7 +329,7 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
   }
 
   // ---- adjustments: "arjun +200" -----------------------------------------------
-  for (const m of [...t.matchAll(/(?<![\p{L}])([\p{L}']+)\s*\+\s*(?:₹|rs\.?\s*)?(\d[\d,]*(?:\.\d{1,2})?k?)/gu)]) {
+  for (const m of [...t.matchAll(/(?<![\p{L}])([\p{L}']+)\s*\+\s*(?:₹|rs\.?\s*)?((?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d{1,2})?k?)/gu)]) {
     const hits = scanner.scan(m[1]);
     const paise = parseAmountToPaise(m[2]);
     if (hits.length && hits[0].ids.length === 1 && !hits[0].all && paise) {
@@ -343,8 +367,18 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
     blank(m.index!, m.index! + m[0].length);
   }
   for (const m of [...t.matchAll(new RegExp(`\\b(?:except|excluding|without|minus|but not|not including|leave out|leaving out|apart from)\\s+${NAMES}`, "gu"))]) {
-    const ids = namesIn(m[1]);
-    for (const w of m[1].split(/\s*(?:,|&|and|aur|\+)\s*/)) {
+    // "except neha, aman 350": the last name has an amount of its own, so it isn't left out.
+    let names = m[1];
+    let span = m[0];
+    if (/^\s*(?:₹|rs\.?)?\s?\d/.test(t.slice(m.index! + m[0].length))) {
+      const cut = names.search(/\s*(?:,|&|\band\b|\baur\b|\+)\s*[\p{L}']+$/u);
+      if (cut > 0) {
+        span = span.slice(0, span.length - (names.length - cut));
+        names = names.slice(0, cut);
+      }
+    }
+    const ids = namesIn(names);
+    for (const w of names.split(/\s*(?:,|&|and|aur|\+)\s*/)) {
       if (w && !scanner.isKnown(w) && !(w in (ov.nameMap ?? {})) && !STOP.has(w) && /^\p{L}+$/u.test(w)) unresolved.set(w, []);
     }
     if (ids.length) {
@@ -353,7 +387,7 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
       const label = amt ? labelFrom(part.text.slice(0, amt.start), [], scanner).split(" ")[0] : "";
       exclusions.push(label ? { members: ids, kind: "item", keyword: label, segment: true } : { members: ids, kind: "whole" });
     }
-    blank(m.index!, m.index! + m[0].length);
+    blank(m.index!, m.index! + span.length);
   }
   for (const m of [...t.matchAll(new RegExp(`${NAMES}\\s+(?:didn'?t|did not|doesn'?t|does not|don'?t|won'?t|isn'?t|wasn'?t|not|no|skip(?:s|ped)?|skipping|is out of|out of|nahi)\\s*(?:(?:have|having|take|taking|order|ordered|the|any|a|some)\\s+)*([\\p{L}]+)?`, "gu"))]) {
     const ids = namesIn(m[1]);
@@ -375,7 +409,12 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
   let instructionText = "";
 
   for (const part of t.split(SEGMENT_SPLIT)) {
-    const amts = amountsIn(part);
+    // "2 pizzas for 600": a bare 1-2 digit number before a word, with a price later, is a count.
+    const amts = amountsIn(part).filter((a, i, all) => {
+      if (i === all.length - 1 || !/^\d{1,2}$/.test(part.slice(a.start, a.end).trim())) return true;
+      const next = part.slice(a.end).match(/^\s+([\p{L}']+)/u);
+      return !next || scanner.isKnown(next[1]) || STOP.has(next[1]);
+    });
     if (!amts.length) {
       instructionText += " " + part;
       continue;
@@ -397,14 +436,14 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
       // "total" and "bill" are stop words, so check the raw words rather than the label.
       const bare = cleanBefore.replace(/[^\p{L}\s]/gu, " ").replace(/\s+/g, " ").trim();
       if (/^(sub\s?total|subtotal)$/.test(bare)) return;
-      if (/^(total|grand total|bill|bill total|total bill|amount|net|net total|the bill|the total)$/.test(bare)) {
+      if (/^(?:the\s+)?(?:total|grand total|bill|bill total|total bill|amount|total amount|net|net total)(?:\s+(?:is|was|came to|comes to|of))?$/.test(bare)) {
         explicitTotal = a.paise;
         if (after.trim()) instructionText += " " + after;
         return;
       }
-      // "riya 500" / "500 riya" / "riya owes 500" → an exact amount for that person
+      // "riya 500" / "500 riya" / "riya owes 500" / "me 830" → an exact amount for that person
       const personOnly = !label && hits.length === 1 && hits[0].ids.length === 1 && !hits[0].all;
-      if ((personOnly || (isOwes && members.length === 1)) && !hits[0]?.self) {
+      if (personOnly || (isOwes && members.length === 1 && !hits[0]?.self)) {
         exactCandidates.push({ member: members[0], paise: a.paise });
         return;
       }
@@ -437,6 +476,8 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
   if (!description) description = labelFrom(instructionText, instHits, scanner);
   // "kabir and i had coffee for 360"
   if (!description && claims.length) description = claims[0].keyword;
+  // "kabir had the beer for 540"
+  if (!description && own.items.length) description = own.items[0];
   out.description = description ? capitalise(description) : null;
   out.category = categorise(raw.toLowerCase());
 
@@ -519,6 +560,7 @@ export function parseWithRules(raw: string, roster: Roster, ov: Overrides = {}, 
       // "Riya 500, Kabir 300" with no total: the total is the sum.
       out.totalPaise = exactCandidates.reduce((s, e) => s + e.paise, 0);
       out.remainder = out.remainder ?? "equal";
+      out.totalIsSum = true;
     }
     out.exact = exactCandidates.map((e) => ({ member: e.member, amountPaise: e.paise }));
     out.rule = out.rule ?? "exact";
@@ -749,6 +791,70 @@ interface AmountHit {
   start: number;
   end: number;
   paise: number;
+}
+
+/** "390 + 440" → "830", so a sum reads as one amount. "arjun +200" (an adjustment) is left alone. */
+function addUpSums(t: string): string {
+  const term = String.raw`(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d{1,2})?k?`;
+  return t.replace(new RegExp(`(?<![\\d,])(?<!\\d\\.)${term}(?:\\s*\\+\\s*${term})+(?![\\p{L}\\d])`, "gu"), (s) => {
+    const parts = s.split("+").map((x) => parseAmountToPaise(x.trim()));
+    if (parts.some((x) => x == null)) return s;
+    const p = parts.reduce<number>((a, b) => a + b!, 0);
+    return p % 100 ? (p / 100).toFixed(2) : String(p / 100);
+  });
+}
+
+/**
+ * Ways of saying one person's own amount, rewritten to "aman 350" so the segment pass reads it
+ * as an exact share: "Aman took something for 350", "Neha only had a coffee for 100", "I had
+ * 830", "Aman owes me 350", "Rohan's share is 250".
+ *
+ * Naming an item on a bill with a total, "Aman's drinks were 400" or "Kabir had the beer for
+ * 540", is an extra on top of an equal share instead, written "aman +400" for the adjustment pass;
+ * once a message has one, a bare "Rohan's 300" is an extra too. With no other amount in the
+ * message, the item's price is the person's whole share. Returns the item words, for a label.
+ */
+function personAmounts(t: string, scanner: Scanner): { text: string; items: string[] } {
+  const isPerson = (w: string) => {
+    const hits = scanner.scan(w);
+    return hits.length === 1 && hits[0].ids.length === 1 && !hits[0].all && hits[0].start === 0 && hits[0].end === w.length;
+  };
+  // "kabir and i had coffee for 360" is a shared item, not Arjun's own amount.
+  const inList = (before: string) => {
+    const m = before.match(/([\p{L}']+)\s*(?:,|&|\band\b|\baur\b|\+)\s*$/u);
+    return !!m && scanner.isKnown(m[1]);
+  };
+  const otherAmounts = findAmounts(t).length > 1;
+  const items: string[] = [];
+  let extras = false;
+  t = t.replace(
+    new RegExp(`(?<![\\p{L}])([\\p{L}]+)'s\\s+([\\p{L}]+)\\s+(?:(?:is|was|were|are|=|cost|costs|came\\s+to|for)\\s+)?(${AMOUNT_RE})${AMOUNT_END}`, "gu"),
+    (s, name: string, word: string, amt: string) => {
+      if (!otherAmounts || !isPerson(name) || SHARE_WORDS.test(word) || scanner.isKnown(word) || /^(is|was|were|are)$/.test(word)) return s;
+      extras = true;
+      return `${name} +${amt}`;
+    },
+  );
+  t = t.replace(
+    new RegExp(`(?<![\\p{L}])([\\p{L}]+)'s\\s+(?:(share|part|portion|amount|bill|total|cut|contribution)\\s+)?(?:(?:is|was|=|comes\\s+to|came\\s+to)\\s+)?(${AMOUNT_RE})${AMOUNT_END}`, "gu"),
+    (s, name: string, shareWord: string | undefined, amt: string) => {
+      if (!isPerson(name)) return s;
+      return extras && !shareWord ? `${name} +${amt}` : `${name} ${amt}`;
+    },
+  );
+  t = t.replace(
+    new RegExp(
+      `(?<![\\p{L}])([\\p{L}']+)\\s+(?:(only|just)\\s+|also\\s+)?(?:took|had|has|ordered|got|ate|drank|spent|used|bought|owes|owe)\\s+(?:(?:me|us)\\s+)?(?:(?:a|an|some|the)\\s+)?(?:([\\p{L}]+)\\s+)?(?:(?:for|worth|of|at|=)\\s+)?(${AMOUNT_RE})(?:\\s+worth)?${AMOUNT_END}`,
+      "gu",
+    ),
+    (s, name: string, only: string | undefined, word: string | undefined, amt: string, offset: number, whole: string) => {
+      if (!isPerson(name) || inList(whole.slice(0, offset)) || (word && scanner.isKnown(word))) return s;
+      const item = word && !/^(something|stuff|things?|items?|anything|food)$/.test(word) ? word : null;
+      if (item) items.push(item);
+      return item && otherAmounts && !only ? `${name} +${amt}` : `${name} ${amt}`;
+    },
+  );
+  return { text: t, items };
 }
 
 export function findAmounts(s: string): AmountHit[] {

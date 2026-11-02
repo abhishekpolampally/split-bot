@@ -140,6 +140,16 @@ function applyOverrides(p: ParsedMessage, ov: Overrides): ParsedMessage {
 }
 
 async function createFlow(input: MentionInput, parsed: ParsedMessage, roster: Roster, ov: Overrides, round: number) {
+  // "Total is 1430" then "@splitbot Aman 350, Rohan 250": the mention gave no total, so use the one
+  // the sender said just before. Kept in the overrides so it survives any questions that follow.
+  let intro: string | undefined;
+  if (parsed.totalIsSum && ov.totalPaise == null) {
+    const before = await totalSaidBefore(input);
+    if (before && before > (parsed.totalPaise ?? 0)) {
+      ov = { ...ov, totalPaise: before };
+      intro = `Using the ${formatINR(before)} total from your last message.`;
+    }
+  }
   const outcome = buildSpec(parsed, roster, ov, round >= MAX_QUESTIONS);
   if (outcome.kind === "reply") return botSay(input.group.id, outcome.text);
   if (outcome.kind === "question") return ask(input, outcome.question, ov, round);
@@ -149,7 +159,30 @@ async function createFlow(input: MentionInput, parsed: ParsedMessage, roster: Ro
     sourceMessageId: input.sourceMessageId,
     spec: outcome.spec,
     flags: outcome.flags,
+    intro,
   });
+}
+
+const TOTAL_LOOKBACK_MS = 15 * 60_000;
+
+/** The one amount in the sender's previous message, if it was plain chat from the last 15 minutes. */
+async function totalSaidBefore(input: MentionInput): Promise<number | null> {
+  const [prev] = await db
+    .select()
+    .from(schema.messages)
+    .where(
+      and(
+        eq(schema.messages.groupId, input.group.id),
+        eq(schema.messages.senderMemberId, input.sender.id),
+        lt(schema.messages.id, input.sourceMessageId),
+      ),
+    )
+    .orderBy(desc(schema.messages.id))
+    .limit(1);
+  if (!prev || prev.kind !== "text" || /@splitbot\b/i.test(prev.body)) return null;
+  if (Date.now() - prev.createdAt.getTime() > TOTAL_LOOKBACK_MS) return null;
+  const amounts = findAmounts(" " + prev.body.toLowerCase() + " ");
+  return amounts.length === 1 ? amounts[0].paise : null;
 }
 
 async function ask(input: MentionInput, question: Question, ov: Overrides, round: number) {
