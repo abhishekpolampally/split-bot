@@ -625,7 +625,7 @@ const REF_FILLER =
 /** How precisely a set of clues picks out one bill. "The last one" is precise; "the bill" isn't. */
 function refConfidence(r: ExpenseRef): number {
   let c = 0;
-  if (r.ordinal) c += 0.9;
+  if (r.ordinal || r.count) c += 0.9;
   if (r.day) c += 0.5;
   if (r.amountPaise) c += 0.6;
   if (r.payer) c += 0.5;
@@ -633,6 +633,26 @@ function refConfidence(r: ExpenseRef): number {
   // A long run of leftover words usually means we didn't understand the message.
   if (r.keyword) c += r.keyword.split(" ").length <= 2 ? 0.6 : 0.3;
   return Math.min(1, Math.round(c * 100) / 100);
+}
+
+const COUNT_WORDS: Record<string, number> = {
+  two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, both: 2, couple: 2, few: 3,
+};
+const SEVERAL_BILLS = "(?:bills?|expenses?|entries|entry|ones|splits|transactions)";
+
+/** "the last two", "both cab bills", "the last 3", "2 bills": how many bills, and where it's written. */
+function countIn(t: string): { count: number; start: number; end: number } | null {
+  const pointer = "(?:(?:the\\s+)?(?:last|latest|previous|recent|newest|these|those|top|first)\\s+)?";
+  const word = t.match(new RegExp(`\\b${pointer}(two|three|four|five|six|seven|eight|nine|ten|both|couple|few)\\b(?:\\s+of\\s+(?:them|those|these|the))?`));
+  // A digit is a count only next to "last …" or "… bills", so "delete the 640 cab" stays an amount.
+  const digit =
+    t.match(new RegExp(`\\b(?:the\\s+)?(?:last|latest|previous|recent|newest|these|those|top|first)\\s+(\\d{1,2})\\b(?!\\s*(?:rs|₹|rupees?|k\\b|/-|one\\b))`)) ??
+    t.match(new RegExp(`\\b(\\d{1,2})(?=\\s+(?:[\\p{L}]+\\s+)?${SEVERAL_BILLS}\\b)`, "u"));
+  const m = word ?? digit;
+  if (!m) return null;
+  const count = COUNT_WORDS[m[1]] ?? Number(m[1]);
+  if (count < 2) return null;
+  return { count, start: m.index!, end: m.index! + m[0].length };
 }
 
 /**
@@ -654,11 +674,18 @@ function expenseRefIn(text: string, scanner: Scanner, sender: string, now: Date,
     blank(day.start, day.end);
   }
 
-  const second = t.match(/\b(?:(?:second|2nd)\s+(?:last|latest|most\s+recent)|last\s+but\s+one|(?:the\s+)?one\s+before\s+(?:that|this|it|the\s+last(?:\s+one)?|last)|before\s+(?:that|the\s+last(?:\s+one)?))\b/);
+  // "the last two", "both", "the last 3 bills": a count, not a ₹2 bill or a bill called "two".
+  const several = mode === "delete" ? countIn(t) : null;
+  if (several) {
+    ref.count = several.count;
+    blank(several.start, several.end);
+  }
+
+  const second = several ? null : t.match(/\b(?:(?:second|2nd)\s+(?:last|latest|most\s+recent)|last\s+but\s+one|(?:the\s+)?one\s+before\s+(?:that|this|it|the\s+last(?:\s+one)?|last)|before\s+(?:that|the\s+last(?:\s+one)?))\b/);
   if (second) {
     ref.ordinal = 2;
     blank(second.index!, second.index! + second[0].length);
-  } else if (/\b(last|latest|previous|recent|newest|that|this|it|undo)\b/.test(t)) {
+  } else if (!several && /\b(last|latest|previous|recent|newest|that|this|it|undo)\b/.test(t)) {
     ref.ordinal = 1;
   }
 

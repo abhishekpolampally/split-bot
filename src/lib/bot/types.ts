@@ -81,6 +81,8 @@ export interface ExpenseRef {
   /** A name without "paid" ("Kabir's dinner"): the payer or anyone in the split. */
   member: string | null;
   day: DayRange | null;
+  /** "the last two", "both", "the last 3 bills": several bills at once. Only set for 2 or more. */
+  count?: number;
   /** 0..1, how precisely the clues pick out a bill. Too low and the bot asks instead of searching. */
   confidence: number;
 }

@@ -119,6 +119,25 @@ describe("deleting a bill", () => {
     expect(p.expenseRef).toMatchObject(which);
   });
 
+  it.each([
+    ["delete the last 2 bills", { count: 2, amountPaise: null, keyword: null }],
+    ["delete the last two", { count: 2, keyword: null }],
+    ["remove the last two bills", { count: 2 }],
+    ["delete both cab bills", { count: 2, keyword: "cab" }],
+    ["get rid of the last 3", { count: 3, amountPaise: null }],
+    ["delete the last couple of bills", { count: 2 }],
+    ["delete yesterday's two cab bills", { count: 2, keyword: "cab", day: { from: "2026-10-18" } }],
+    ["hata do last 2", { count: 2, amountPaise: null }],
+  ])("“%s” asks for several bills, not a ₹2 one or one called “two”", (text, which) => {
+    const p = parse(text);
+    expect(p.intent).toBe("delete_expense");
+    expect(p.expenseRef).toMatchObject({ ordinal: null, ...which });
+  });
+
+  it.each(["delete the 640 cab", "delete the last one", "delete the last 640 one"])("“%s” isn't a count", (text) => {
+    expect(parse(text).expenseRef!.count).toBeUndefined();
+  });
+
   it.each(["delete the bill", "remove the expense", "delete", "delete the thing"])("“%s” is too vague to search", (text) => {
     const p = parse(text);
     expect(p.intent).toBe("delete_expense");

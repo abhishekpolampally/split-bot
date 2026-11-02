@@ -408,6 +408,25 @@ describe.skipIf(!TEST_URL)("deleting a bill", () => {
     expect(await g.liveBills()).toHaveLength(3);
   });
 
+  it("“delete the last 2 bills” asks which, one tap per bill, and deletes nothing yet", async () => {
+    const g = await withBills();
+    for (const text of ["delete the last 2 bills", "delete the last two", "get rid of both"]) {
+      const q = await g.say(text);
+      expect(g.question(q).text).toBe("I delete one bill at a time, so nothing gets wiped by accident. Here are the last 2. Tap the one to delete, then ask again for the next.");
+      expect(g.labels(q).map((l) => l.split(" · ")[0])).toEqual(["Restaurant bill", "Dinner", "Keep everything"]);
+    }
+    expect(await g.liveBills()).toHaveLength(3);
+    await g.tap(await g.say("delete the last 2 bills"), "Dinner");
+    expect(await g.liveBills()).toEqual(["Cab", "Restaurant bill"]);
+  });
+
+  it("“delete the last 3 cab bills” narrows first and says when there are fewer", async () => {
+    const g = await withBills();
+    const q = await g.say("delete the last 3 cab bills");
+    expect(g.question(q).text).toMatch(/^I delete one bill at a time, so nothing gets wiped by accident\. I only found this one “cab”\./);
+    expect(g.labels(q).map((l) => l.split(" · ")[0])).toEqual(["Cab", "Keep everything"]);
+  });
+
   it("spending totals follow deletes", async () => {
     const g = await withBills();
     expect((await g.say("how much did we spend on food")).body).toMatch(/spent ₹3,320 on food across 2 expenses/);
