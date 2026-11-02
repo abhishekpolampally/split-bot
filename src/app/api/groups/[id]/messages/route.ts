@@ -12,13 +12,13 @@ type Ctx = { params: Promise<{ id: string }> };
 
 export const GET = route<Ctx>(async (req, ctx) => {
   const { id } = await ctx.params;
-  const { group, me } = await requireMember(id);
+  const { user, group, me } = await requireMember(id);
   const url = new URL(req.url);
   const after = Number(url.searchParams.get("after") ?? 0) || 0;
   const sinceRaw = url.searchParams.get("since");
   const since = sinceRaw ? new Date(sinceRaw) : null;
 
-  const { messages, maxUpdated } = await fetchMessages(group.id, after, since && !isNaN(+since) ? since : null);
+  const { messages, maxUpdated, truncated, hasMore } = await fetchMessages(group.id, after, since && !isNaN(+since) ? since : null);
   const maxId = messages.reduce((m, x) => Math.max(m, x.id), after);
   // Independent of each other, so run them side by side. The bot-typing flag comes from the
   // group row requireMember already loaded, saving a query on every poll.
@@ -32,7 +32,11 @@ export const GET = route<Ctx>(async (req, ctx) => {
   ]);
 
   return json({
+    // Who's asking: the device cache checks it against whose chats it holds.
+    userId: user.id,
     messages,
+    truncated,
+    hasMore,
     cursor: { after: maxId, since: (maxUpdated ?? new Date(0)).toISOString() },
     botBusy: group.botBusyUntil && group.botBusyUntil > new Date() ? (group.botBusyLabel ?? "Thinking…") : null,
     members,

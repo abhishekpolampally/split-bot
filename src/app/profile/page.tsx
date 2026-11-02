@@ -3,6 +3,7 @@
 import { Bell } from "lucide-react";
 import { useEffect, useState } from "react";
 import { BottomNav, Button, ErrorNote, Field, inputCls, Loading } from "@/components/ui";
+import { clearChatCache } from "@/lib/chatStore";
 import { api, useApi, useBrowserValue } from "@/lib/client";
 import { track } from "@/lib/firebase/analytics";
 import { disablePush, enablePush, pushState, type PushState } from "@/lib/firebase/push";
@@ -18,6 +19,7 @@ export default function Profile() {
   async function logout() {
     await disablePush().catch(() => {}); // stop this device getting this account's notifications
     await api("/api/auth/logout", { body: {} });
+    await clearChatCache(); // saved chats belong to this account
     // A full page load, not router.push: it drops this account's cached data from memory, and
     // replace() keeps Back from returning to a logged-out profile.
     window.location.replace("/login");
