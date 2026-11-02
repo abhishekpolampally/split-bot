@@ -215,6 +215,23 @@ describe.skipIf(!TEST_URL)("adding a bill", () => {
     expect(await g.sharesOn(card)).toEqual({ Arjun: 60, Riya: 60 });
   });
 
+  // Known gap: the bot only reads the message that mentions it, so a total said just before is
+  // lost. When this passes, it.fails turns red: make it a plain it().
+  it.fails("uses the total from the sender's previous message, when the mention doesn't repeat it", async () => {
+    const g = await newGroup();
+    await db.insert(schema.messages).values({ groupId: g.group.id, senderMemberId: g.arjun.id, kind: "text", body: "Total is 1430, split between us" });
+    const card = await g.say("Kabir 350, Riya 250, the rest is mine");
+    expect((await g.proposalOf(card)).result.totalPaise).toBe(143000);
+    expect(await g.sharesOn(card)).toEqual({ Arjun: 830, Kabir: 350, Riya: 250 });
+  });
+
+  it.fails("the bug report: total in one message, who had what in the next", async () => {
+    const g = await newGroup();
+    await db.insert(schema.messages).values({ groupId: g.group.id, senderMemberId: g.arjun.id, kind: "text", body: "Total is 1430, split between that." });
+    const card = await g.say("where I had 390 + 440, Kabir took something for 350 and riya took something for 250");
+    expect(await g.sharesOn(card)).toEqual({ Arjun: 830, Kabir: 350, Riya: 250 });
+  });
+
   it("no amount: explains instead of guessing", async () => {
     const g = await newGroup();
     expect((await g.say("hi")).body).toContain("Mention me with what you paid");
